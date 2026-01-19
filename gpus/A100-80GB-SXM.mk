@@ -1,4 +1,4 @@
-# A100 (GA100) — using PCIe boost clock = 1.410 GHz
+# A100 (GA100) — using SXM  boost clock = 1.410 GHz
 PEAK        = 108*32*2*1.410          # = ~9.75  TFLOPS (FP64, counting FMA as 2)
 PEAK_NOFMA  = $(PEAK)/2               # = ~4.87  TFLOPS (FP64, counting FMA as 1)
 
