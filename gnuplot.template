@@ -1,0 +1,21 @@
+warp_instruction_performance = {warp_instructions} / ({elapsed_s} * 1000000000)
+thread_instruction_performance = {thread_instructions} / ({elapsed_s} * 1000000000)
+
+l1_thread_inst_intensity =  {thread_instructions} / {l1_total_32B_transactions}
+l2_thread_inst_intensity =  {thread_instructions} / {l2_transactions}
+hbm_thread_inst_intensity = {thread_instructions} / {dram_transactions}
+
+thread_fp_performance = {flop} / ({elapsed_s} * 1000000000)
+l1_thread_fp_intensity =  {flop} / {l1_bytes}
+l2_thread_fp_intensity =  {flop} / {l2_bytes}
+hbm_thread_fp_intensity = {flop} / {dram_bytes}
+
+warp_shared_instruction_performance = {warp_shared_ld_st_instructions} / ({elapsed_s} * 1000000000)
+shared_warp_inst_intensity = {warp_shared_ld_st_instructions} / {warp_shared_transactions}
+
+fp_instructions_pct = ({fp_instructions} / {tot_instructions}) * 100.
+int_instructions_pct = ({int_instructions} / {tot_instructions}) * 100.
+mem_instructions_pct = ({mem_instructions} / {tot_instructions}) * 100.
+cf_instructions_pct = ({cf_instructions} / {tot_instructions}) * 100.
+threadcomm_instructions_pct = ({threadcomm_instructions} / {tot_instructions}) * 100.
+misc_instructions_pct = ({misc_instructions} / {tot_instructions}) * 100.
