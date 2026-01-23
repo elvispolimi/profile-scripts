@@ -1,4 +1,4 @@
-if (!exists("infile")) infile='instmix.dat'
+if (!exists("infile")) infile='profile.dat'
 if (!exists("outfile")) outfile='instmix.ps'
 set term postscript solid color rounded
 set output outfile
@@ -14,7 +14,9 @@ set ylabel "% of overall instructions"
 set ytics 10
 set auto x
 
-plot infile \
+load infile
+
+plot $instmix \
     using 2 t "misc",\
     '' using 3 t "comm",\
     '' using 4 t "cf",\

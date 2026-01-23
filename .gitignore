@@ -44,3 +44,5 @@ build/
 *.out
 *.app
 *.x
+
+out

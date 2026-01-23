@@ -5,6 +5,13 @@ sm__cycles_elapsed.avg.per_second
 dram__bytes.sum    # DRAM
 lts__t_bytes.sum   # L2
 l1tex__t_bytes.sum # L1
+# Roofline peaks (from raw)
+dram__bytes.sum.per_second
+derived__lts__lts2xbar_bytes.sum.per_second
+derived__l1tex__lsu_writeback_bytes_mem_lg.sum.per_second
+device__attribute_clock_rate
+sm__sass_thread_inst_executed_op_dfma_pred_on.sum.peak_sustained
+sm__sass_thread_inst_executed_op_ffma_pred_on.sum.peak_sustained
 # Instruction mix
 ## FP
 sm__sass_thread_inst_executed_op_dfma_pred_on.sum
@@ -47,6 +54,8 @@ dram__sectors_read.sum                               # dram_read_transactions
 dram__sectors_write.sum                              # dram_write_transactions
 # 2. Thread Predication
 smsp__inst_executed.sum                              # inst_executed (warp level)
+smsp__inst_executed.sum.peak_sustained
+smsp__inst_executed.avg.peak_sustained
 # inst_thread_executed (thread level)
 # 3. Global Memory Pattern Walls
 smsp__inst_executed_op_global_ld.sum                 # inst_executed_global_loads
@@ -58,6 +67,7 @@ smsp__inst_executed_op_shared_st.sum                 # inst_executed_shared_stor
 # Occupancy
 sm__maximum_warps_per_active_cycle_pct # theoretical occupancy
 sm__warps_active.avg.pct_of_peak_sustained_active # achieved occupancy
+device__attribute_num_schedulers_per_multiprocessor
 # # Pipelines usage
 # smsp__inst_executed_pipe_adu.sum
 # smsp__inst_executed_pipe_alu.sum

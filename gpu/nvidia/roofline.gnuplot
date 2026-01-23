@@ -108,11 +108,32 @@ set loadpath
 set fit noerrorvariables
 
 # Device parameters (can be overridden via gnuplot -e)
-if (!exists("peak")) peak = 80 * 32 * 2 * 1.53 # GFLOP/s
+if (!exists("precision")) precision = "fp"
+if (!exists("peak_fp")) peak_fp = 80 * 32 * 2 * 1.53 # GFLOP/s
+if (!exists("peak_dp")) peak_dp = peak_fp / 32 # GFLOP/s
+if (!exists("peak_nofma_fp")) peak_nofma_fp = peak_fp / 2 # GFLOP/s
+if (!exists("peak_nofma_dp")) peak_nofma_dp = peak_dp / 2 # GFLOP/s
 if (!exists("l1_peak")) l1_peak = 437.5 * 32 # GB/s
 if (!exists("l2_peak")) l2_peak = 93.6 * 32 # GB/s
 if (!exists("hbm_peak")) hbm_peak = 25.9 * 32 # GB/s
-if (!exists("peak_nofma")) peak_nofma = peak / 2 # GFLOP/s
+
+if (precision eq "dp") {
+    peak = peak_dp
+    peak_nofma = peak_nofma_dp
+    precision_label = "FP64"
+    thread_fp_performance = thread_performance_dp
+    l1_thread_fp_intensity = l1_thread_intensity_dp
+    l2_thread_fp_intensity = l2_thread_intensity_dp
+    hbm_thread_fp_intensity = hbm_thread_intensity_dp
+} else {
+    peak = peak_fp
+    peak_nofma = peak_nofma_fp
+    precision_label = "FP32"
+    thread_fp_performance = thread_performance_sp
+    l1_thread_fp_intensity = l1_thread_intensity_sp
+    l2_thread_fp_intensity = l2_thread_intensity_sp
+    hbm_thread_fp_intensity = hbm_thread_intensity_sp
+}
 
 # Ceilings
 l1_ceiling(x) = peak > (x * l1_peak) ? (x * l1_peak) : peak
@@ -124,6 +145,7 @@ peak_nofma_ceiling(x) = peak_nofma <= (x * l1_peak) ? peak_nofma : 1/0
 # Styling
 line_width = 2
 point_size = 1.5
+slope_angle = 45
 
 hbm_color = '#74460b'
 l1_color = '#eaa800'
@@ -132,11 +154,12 @@ l2_color = '#14967c'
 point = 5
 
 # Ceiling labels
-set label sprintf('Theoretical peak \@ FP64: %.1f GFLOP/s', peak) at 2,peak+1000 textcolor rgb 'black' font ",12"
+label_x = 0.05
+set label sprintf('Theoretical peak \@ %s: %.1f GFLOP/s', precision_label, peak) at 2,peak+1000 textcolor rgb 'black' font ",12"
 set label 'FMA' at 180,peak_nofma+500 right textcolor rgb 'black' font ",12"
-set label sprintf('L1 %.1f GB/s', l1_peak) at 0.05,100 + 0.05 * l1_peak left rotate by 45 textcolor rgb l1_color font ",12"
-set label sprintf('L2 %.1f GB/s', l2_peak) at 0.05,20 + 0.05 * l2_peak left rotate by 45 textcolor rgb l2_color font ",12"
-set label sprintf('HBM %.1f GB/s', hbm_peak)  at 0.05,5 + 0.05 * hbm_peak left rotate by 45 textcolor rgb hbm_color font ",12"
+set label sprintf('L1 %.1f GB/s', l1_peak) at peak_nofma/l1_peak, peak_nofma left rotate by slope_angle textcolor rgb l1_color font ",12"
+set label sprintf('L2 %.1f GB/s', l2_peak) at peak_nofma/l2_peak, peak_nofma left rotate by slope_angle textcolor rgb l2_color font ",12"
+set label sprintf('HBM %.1f GB/s', hbm_peak)  at peak_nofma/hbm_peak, peak_nofma left rotate by slope_angle textcolor rgb hbm_color font ",12"
 
 plot \
 	l1_ceiling(x) lw line_width lc rgb l1_color notitle,\

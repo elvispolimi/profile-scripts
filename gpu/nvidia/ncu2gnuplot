@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+
+import csv
+import sys
+import argparse
+import statistics
+import math
+from collections import defaultdict
+
+parser = argparse.ArgumentParser(
+    description="Generate gnuplot data file from an NVIDIA Nsight profiler CSV file. Reads the CSV from stdin and writes the result to stdout."
+)
+parser.add_argument(
+    "--template",
+    "-t",
+    type=argparse.FileType("r"),
+    default=None,
+    help="Template file containing a python format string to be instantiated with resulting values",
+)
+
+parser.add_argument(
+    "--input",
+    "-i",
+    type=argparse.FileType("r"),
+    default=None,
+    help="Input file",
+)
+parser.add_argument(
+    "--kernels",
+    "-k",
+    required=True,
+    help="Comma-separated list of kernel name substrings to include",
+)
+parser.add_argument(
+    "--raw",
+    type=argparse.FileType("r"),
+    default=None,
+    help="Raw NCU report from --page raw --section SpeedOfLight_HierarchicalSingleRooflineChart",
+)
+
+
+def elapsed_s(d):
+    return d["sm__cycles_elapsed.avg"] / float(d["sm__cycles_elapsed.avg.per_second"])
+
+
+def scalar_flop(d):
+    return (
+        2 * d["sm__sass_thread_inst_executed_op_dfma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_dmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_dadd_pred_on.sum"]
+        + 2 * d["sm__sass_thread_inst_executed_op_ffma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_fmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_fadd_pred_on.sum"]
+        + 2 * d["sm__sass_thread_inst_executed_op_hfma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_hmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_hadd_pred_on.sum"]
+    )
+
+
+def tensor_flop(d):
+    return 512 * d["sm__inst_executed_pipe_tensor.sum"]
+
+def dp_flop(d):
+    return (
+        2 * d["sm__sass_thread_inst_executed_op_dfma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_dmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_dadd_pred_on.sum"]
+    )
+
+
+def fp_flop(d):
+    return (
+        2 * d["sm__sass_thread_inst_executed_op_ffma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_fmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_fadd_pred_on.sum"]
+        + 2 * d["sm__sass_thread_inst_executed_op_hfma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_hmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_hadd_pred_on.sum"]
+        + tensor_flop(d)
+    )
+
+
+def flop(d):
+    return fp_flop(d) + dp_flop(d)
+
+
+def thread_instructions(d):
+    return d["smsp__thread_inst_executed.sum"] / 32.0
+
+
+def l1_global_transactions(d):
+    return (
+        d["l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum"]
+        + d["l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum"]
+    )
+
+
+def l1_shared_transactions(d):
+    return (
+        d["l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum"]
+        + d["l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum"]
+    )
+
+
+def l2_transactions(d):
+    return (
+        d["lts__t_sectors_op_read.sum"]
+        + d["lts__t_sectors_op_atom.sum"] * 2
+        + d["lts__t_sectors_op_red.sum"] * 2
+        + d["lts__t_sectors_op_write.sum"]
+    )
+
+
+def dram_transactions(d):
+    return d["dram__sectors_read.sum"] + d["dram__sectors_write.sum"]
+
+
+def warp_instructions(d):
+    return d["smsp__inst_executed.sum"]
+
+
+def l1_total_32B_transactions(d):
+    return l1_global_transactions(d) + 4 * l1_shared_transactions(d)
+
+
+def warp_global_ld_st_instructions(d):
+    return d["smsp__inst_executed_op_global_ld.sum"]
+
+
+def warp_shared_ld_st_instructions(d):
+    return (
+        d["smsp__inst_executed_op_shared_ld.sum"]
+        + d["smsp__inst_executed_op_shared_st.sum"]
+    )
+
+
+def dram_bytes(d):
+    return d["dram__bytes.sum"]
+
+
+def l2_bytes(d):
+    return d["lts__t_bytes.sum"]
+
+
+def l1_bytes(d):
+    return d["l1tex__t_bytes.sum"]
+
+
+def fp_instructions(d):
+    return (
+        d["sm__sass_thread_inst_executed_op_dfma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_dmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_dadd_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_ffma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_fmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_fadd_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_hfma_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_hmul_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_hadd_pred_on.sum"]
+        + d["sm__inst_executed_pipe_tensor.sum"]
+    )
+
+
+def int_instructions(d):
+    return d["sm__sass_thread_inst_executed_op_integer_pred_on.sum"]
+
+
+def cf_instructions(d):
+    return d["sm__sass_thread_inst_executed_op_control_pred_on.sum"]
+
+
+def threadcomm_instructions(d):
+    return d["sm__sass_thread_inst_executed_op_inter_thread_communication_pred_on.sum"]
+
+
+def mem_instructions(d):
+    return d["sm__sass_thread_inst_executed_op_memory_pred_on.sum"]
+
+
+def misc_instructions(d):
+    return (
+        d["sm__sass_thread_inst_executed_op_bit_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_conversion_pred_on.sum"]
+        + d["sm__sass_thread_inst_executed_op_misc_pred_on.sum"]
+    )
+
+
+def tot_instructions(d):
+    return (
+        fp_instructions(d)
+        + int_instructions(d)
+        + cf_instructions(d)
+        + threadcomm_instructions(d)
+        + mem_instructions(d)
+        + misc_instructions(d)
+    )
+
+
+def instmix_pct(d):
+    tot = tot_instructions(d)
+    keys = [
+        "fp_instructions_pct",
+        "int_instructions_pct",
+        "mem_instructions_pct",
+        "cf_instructions_pct",
+        "threadcomm_instructions_pct",
+        "misc_instructions_pct",
+    ]
+    values = [
+        fp_instructions(d) / tot * 100,
+        int_instructions(d) / tot * 100,
+        mem_instructions(d) / tot * 100,
+        cf_instructions(d) / tot * 100,
+        threadcomm_instructions(d) / tot * 100,
+        misc_instructions(d) / tot * 100,
+    ]
+    # Apply largest remainder method to compensate for rounding errors
+    components = [math.modf(v) for v in values]
+    integral = [v[1] for v in components]
+    fractional = list(sorted(enumerate(v[0] for v in components), key=lambda x: x[1]))
+    while sum(integral) < 100:
+        idx, _ = fractional.pop()
+        integral[idx] += 1
+    return {keys[i]: integral[i] for i in range(len(keys))}
+
+
+def instmix(d):
+    return {
+        "fp_instructions": fp_instructions(d),
+        "int_instructions": int_instructions(d),
+        "mem_instructions": mem_instructions(d),
+        "cf_instructions": cf_instructions(d),
+        "threadcomm_instructions": threadcomm_instructions(d),
+        "misc_instructions": misc_instructions(d),
+        "tot_instructions": tot_instructions(d),
+    }
+
+
+def occupancy(d):
+    peak = d["sm__maximum_warps_per_active_cycle_pct"]
+    sustained = d["sm__warps_active.avg.pct_of_peak_sustained_active"]
+    return {
+        "peak_occupancy_margin_pct": peak - sustained,
+        "sustained_occupancy_pct": sustained,
+    }
+
+
+def efficiency(d):
+    return {"efficiency": thread_instructions(d) / warp_instructions(d) * 100}
+
+
+def performance(d):
+    return {"flops": flop(d) / (elapsed_s(d) * 1000000000)}
+
+
+def canonicalize(d):
+    return {
+        # Timing
+        "elapsed_s": elapsed_s(d),
+        # Bandwidth
+        "dram_bytes": dram_bytes(d),
+        "l2_bytes": l2_bytes(d),
+        "l1_bytes": l1_bytes(d),
+        # FLOP
+        "flop": flop(d),
+        "scalar_flop": scalar_flop(d),
+        "fp_flop": fp_flop(d),
+        "dp_flop": dp_flop(d),
+        "tensor_flop": tensor_flop(d),
+        # 1. Instruction Intensity and Performance
+        "thread_instructions": thread_instructions(d),
+        "l1_global_transactions": l1_global_transactions(d),
+        "l1_shared_transactions": l1_shared_transactions(d),
+        "l2_transactions": l2_transactions(d),
+        "dram_transactions": dram_transactions(d),
+        # 2. Thread Predication
+        "warp_instructions": warp_instructions(d),
+        # 3. Global Memory Pattern Walls
+        "l1_total_32B_transactions": l1_total_32B_transactions(d),
+        "warp_global_ld_st_instructions": warp_global_ld_st_instructions(d),
+        # 4. Shared Memory Walls
+        "warp_shared_ld_st_instructions": warp_shared_ld_st_instructions(d),
+        "warp_shared_transactions": l1_shared_transactions(d),
+        # Instruction mix
+        **instmix(d),
+        **instmix_pct(d),
+        # Occupancy
+        **occupancy(d),
+        # Efficiency
+        **efficiency(d),
+        # Performance
+        **performance(d),
+    }
+
+
+def mean(data):
+    try:
+        return statistics.geometric_mean(data)
+    except statistics.StatisticsError:
+        # With empty series or series with just zeros
+        return 0.0
+
+
+def accumulate(d):
+    return {k: mean(v) for k, v in d.items()}
+
+
+def parse_kernels(arg):
+    return [k.strip() for k in arg.split(",") if k.strip()]
+
+
+def transform(f, kernels):
+    r = csv.DictReader(f, delimiter=",", quotechar='"')
+    d = defaultdict(list)
+    for row in r:
+        if not any(k in row["Kernel Name"] for k in kernels):
+            continue
+        k = row["Metric Name"]
+        v = float(row["Metric Value"].replace(",", ""))
+        d[k].append(v)
+    return canonicalize(accumulate(d))
+
+
+def parse_raw_metrics(f, kernels):
+    metrics = defaultdict(list)
+    units = {}
+    active = False
+    for line in f:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("==PROF==", "[", "Metric Name", "---")):
+            continue
+        if stripped.startswith("void "):
+            active = any(k in stripped for k in kernels)
+            continue
+        if "__" not in stripped:
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0]
+        value_str = parts[-1].replace(",", "")
+        unit = parts[-2] if len(parts) > 2 else ""
+        try:
+            value = float(value_str)
+        except ValueError:
+            continue
+        if active:
+            metrics[name].append(value)
+            units[name] = unit
+    return accumulate(metrics), units
+
+
+def per_second_to_gbps(value, unit):
+    unit = unit.lower()
+    if unit in ("gbyte/s", "gbyte"):
+        return value
+    if unit in ("mbyte/s", "mbyte"):
+        return value / 1000.0
+    if unit in ("kbyte/s", "kbyte"):
+        return value / 1000000.0
+    # Assume bytes/s
+    return value / 1000000000.0
+
+
+def per_second_to_bytes_per_s(value, unit):
+    unit = unit.lower()
+    if unit in ("gbyte/s", "gbyte"):
+        return value * 1000000000.0
+    if unit in ("mbyte/s", "mbyte"):
+        return value * 1000000.0
+    if unit in ("kbyte/s", "kbyte"):
+        return value * 1000.0
+    return value
+
+
+def to_bytes(value, unit):
+    unit = unit.lower()
+    if unit in ("gbyte",):
+        return value * 1000000000.0
+    if unit in ("mbyte",):
+        return value * 1000000.0
+    if unit in ("kbyte",):
+        return value * 1000.0
+    return value
+
+
+def per_second_to_hz(value, unit):
+    unit = unit.lower()
+    if unit in ("ghz",):
+        return value * 1000000000.0
+    if unit in ("mhz",):
+        return value * 1000000.0
+    if unit in ("khz",):
+        return value * 1000.0
+    return value
+
+
+def peaks_from_raw(metrics, units):
+    peaks = {}
+    l1_key = "derived__l1tex__lsu_writeback_bytes_mem_lg.sum.per_second"
+    l2_key = "derived__lts__lts2xbar_bytes.sum.per_second"
+    hbm_key = "dram__bytes.sum.per_second"
+    l1_bytes_per_s = None
+    l2_bytes_per_s = None
+    hbm_bytes_per_s = None
+    if l1_key in metrics:
+        l1_bytes_per_s = per_second_to_bytes_per_s(metrics[l1_key], units.get(l1_key, ""))
+        peaks["l1_peak"] = l1_bytes_per_s / 1000000000.0
+    if l2_key in metrics:
+        l2_bytes_per_s = per_second_to_bytes_per_s(metrics[l2_key], units.get(l2_key, ""))
+        peaks["l2_peak"] = l2_bytes_per_s / 1000000000.0
+    if hbm_key in metrics:
+        hbm_bytes_per_s = per_second_to_bytes_per_s(metrics[hbm_key], units.get(hbm_key, ""))
+        peaks["hbm_peak"] = hbm_bytes_per_s / 1000000000.0
+
+    if l1_bytes_per_s:
+        peaks["l1_peak_txn"] = (l1_bytes_per_s / 32.0) / 1000000000.0
+    if l2_bytes_per_s:
+        peaks["l2_peak_txn"] = (l2_bytes_per_s / 32.0) / 1000000000.0
+    if hbm_bytes_per_s:
+        peaks["hbm_peak_txn"] = (hbm_bytes_per_s / 32.0) / 1000000000.0
+
+    clock_khz = metrics.get("device__attribute_clock_rate")
+    if clock_khz:
+        clock_hz = clock_khz * 1000.0
+        sm_count = metrics.get("device__attribute_multiprocessor_count") or metrics.get(
+            "launch__sm_count"
+        )
+        ffma_sum = "sm__sass_thread_inst_executed_op_ffma_pred_on.sum.peak_sustained"
+        dfma_sum = "sm__sass_thread_inst_executed_op_dfma_pred_on.sum.peak_sustained"
+        ffma_avg = "sm__sass_thread_inst_executed_op_ffma_pred_on.avg.peak_sustained"
+        dfma_avg = "sm__sass_thread_inst_executed_op_dfma_pred_on.avg.peak_sustained"
+
+        fp_inst_per_cycle = None
+        dp_inst_per_cycle = None
+        if ffma_sum in metrics:
+            fp_inst_per_cycle = metrics[ffma_sum]
+        elif sm_count and ffma_avg in metrics:
+            fp_inst_per_cycle = metrics[ffma_avg] * sm_count
+        if dfma_sum in metrics:
+            dp_inst_per_cycle = metrics[dfma_sum]
+        elif sm_count and dfma_avg in metrics:
+            dp_inst_per_cycle = metrics[dfma_avg] * sm_count
+
+        if fp_inst_per_cycle:
+            peaks["peak_fp"] = fp_inst_per_cycle * clock_hz * 2.0 / 1000000000.0
+            peaks["peak_nofma_fp"] = peaks["peak_fp"] / 2.0
+        if dp_inst_per_cycle:
+            peaks["peak_dp"] = dp_inst_per_cycle * clock_hz * 2.0 / 1000000000.0
+            peaks["peak_nofma_dp"] = peaks["peak_dp"] / 2.0
+
+        smsp_sum = "smsp__inst_executed.sum.peak_sustained"
+        smsp_avg = "smsp__inst_executed.avg.peak_sustained"
+        sched = metrics.get("device__attribute_num_schedulers_per_multiprocessor")
+        smsp_count = sm_count * sched if sm_count and sched else None
+        inst_per_cycle = None
+        if smsp_sum in metrics:
+            inst_per_cycle = metrics[smsp_sum]
+        elif smsp_count and smsp_avg in metrics:
+            inst_per_cycle = metrics[smsp_avg] * smsp_count
+        if inst_per_cycle:
+            peaks["inst_peak"] = inst_per_cycle * clock_hz / 1000000000.0
+    return peaks
+
+
+def raw_to_data(metrics, units):
+    if "sm__cycles_elapsed.avg.per_second" in metrics:
+        metrics["sm__cycles_elapsed.avg.per_second"] = per_second_to_hz(
+            metrics["sm__cycles_elapsed.avg.per_second"],
+            units.get("sm__cycles_elapsed.avg.per_second", ""),
+        )
+    if "gpu__time_duration.sum" in metrics:
+        elapsed_s = metrics["gpu__time_duration.sum"] * 1e-6
+        if "sm__cycles_elapsed.avg.per_second" in metrics and "sm__cycles_elapsed.avg" not in metrics:
+            metrics["sm__cycles_elapsed.avg"] = (
+                metrics["sm__cycles_elapsed.avg.per_second"] * elapsed_s
+            )
+        for key in ("dram__bytes.sum", "lts__t_bytes.sum", "l1tex__t_bytes.sum"):
+            per_key = key + ".per_second"
+            if per_key in metrics and key not in metrics:
+                bps = per_second_to_bytes_per_s(metrics[per_key], units.get(per_key, ""))
+                metrics[key] = bps * elapsed_s
+    for key in ("dram__bytes.sum", "lts__t_bytes.sum", "l1tex__t_bytes.sum"):
+        if key in metrics:
+            metrics[key] = to_bytes(metrics[key], units.get(key, ""))
+
+    required = [
+        "sm__cycles_elapsed.avg",
+        "sm__cycles_elapsed.avg.per_second",
+        "dram__bytes.sum",
+        "lts__t_bytes.sum",
+        "l1tex__t_bytes.sum",
+        "sm__sass_thread_inst_executed_op_dfma_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_dmul_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_dadd_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
+        "sm__inst_executed_pipe_tensor.sum",
+        "sm__sass_thread_inst_executed_op_integer_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_control_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_inter_thread_communication_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_memory_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_bit_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_conversion_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_misc_pred_on.sum",
+        "smsp__thread_inst_executed.sum",
+        "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum",
+        "l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum",
+        "l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum",
+        "l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum",
+        "lts__t_sectors_op_read.sum",
+        "lts__t_sectors_op_atom.sum",
+        "lts__t_sectors_op_red.sum",
+        "lts__t_sectors_op_write.sum",
+        "dram__sectors_read.sum",
+        "dram__sectors_write.sum",
+        "smsp__inst_executed.sum",
+        "smsp__inst_executed_op_global_ld.sum",
+        "smsp__inst_executed_op_shared_ld.sum",
+        "smsp__inst_executed_op_shared_st.sum",
+        "sm__maximum_warps_per_active_cycle_pct",
+        "sm__warps_active.avg.pct_of_peak_sustained_active",
+    ]
+    missing = [k for k in required if k not in metrics]
+    if missing:
+        missing_str = ", ".join(missing)
+        raise ValueError(f"Missing required raw metrics: {missing_str}")
+    return canonicalize(metrics)
+
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+    if not (args.input or args.raw):
+        parser.error("one of --input or --raw is required")
+    kernels = parse_kernels(args.kernels)
+    peaks = {}
+    if args.input:
+        data = transform(args.input, kernels)
+    else:
+        metrics, units = parse_raw_metrics(args.raw, kernels)
+        data = raw_to_data(metrics, units)
+        peaks = peaks_from_raw(metrics, units)
+    template = args.template.read()
+    output = template.format(**data)
+    instmix_line = (
+        f"exe {data['misc_instructions_pct']} {data['threadcomm_instructions_pct']} "
+        f"{data['cf_instructions_pct']} {data['mem_instructions_pct']} "
+        f"{data['int_instructions_pct']} {data['fp_instructions_pct']}"
+    )
+    output = output + "\n$instmix << EOD\n" + instmix_line + "\nEOD\n"
+    if args.raw and args.input:
+        metrics, units = parse_raw_metrics(args.raw, kernels)
+        peaks = peaks_from_raw(metrics, units)
+    if peaks:
+        extra = "\n".join(f"{k} = {v}" for k, v in peaks.items())
+        output = output + "\n" + extra
+    print(output)
+    # else:
+    #     print("\n".join(f"{k} = {v}" for k, v in data.items()))

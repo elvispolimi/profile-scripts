@@ -49,6 +49,7 @@ set mapping cartesian
 set datafile separator whitespace
 unset hidden3d
 set size 1,1
+set size ratio -1
 set origin 0,0
 set style data lines
 set style function lines
@@ -103,9 +104,13 @@ set fit noerrorvariables
 
 # Device parameters (can be overridden via gnuplot -e)
 if (!exists("peak")) peak = 489.6 # GIPS
+if (exists("inst_peak")) peak = inst_peak
 if (!exists("l1_peak")) l1_peak = 437.5 # GTXN/s
 if (!exists("l2_peak")) l2_peak = 93.6 # GTXN/s
 if (!exists("hbm_peak")) hbm_peak = 25.9 # GTXN/s
+if (exists("l1_peak_txn")) l1_peak = l1_peak_txn
+if (exists("l2_peak_txn")) l2_peak = l2_peak_txn
+if (exists("hbm_peak_txn")) hbm_peak = hbm_peak_txn
 
 # Ceilings
 l1_ceiling(x) = peak > (x * l1_peak) ? (x * l1_peak) : peak
@@ -116,6 +121,7 @@ peak_ceiling(x) = peak <= (x * l1_peak) ? peak : 1/0
 # Styling
 line_width = 2
 point_size = 1.5
+slope_angle = 45
 
 l1_color = 'red'
 l2_color = 'green'
@@ -125,9 +131,9 @@ point = 5
 
 # Ceiling labels
 set label sprintf('Theoretical peak: %.1f warp GIPS', peak) at 2,peak + 90 textcolor rgb 'black' font ",12"
-set label sprintf('L1 %.1f GTXN/s', l1_peak) at 0.05,4 + 0.05 * l1_peak  left rotate by 50 textcolor rgb l1_color font ",12"
-set label sprintf('L2 %.1f GTXN/s', l2_peak)  at 0.05,0.6 + 0.05 * l2_peak  left rotate by 50 textcolor rgb l2_color font ",12"
-set label sprintf('HBM %.1f GTXN/s', hbm_peak) at 0.05,0.2 + 0.05 * hbm_peak left rotate by 50 textcolor rgb hbm_color font ",12"
+set label sprintf('L1 %.1f GTXN/s', l1_peak) at 0.05,4 + 0.05 * l1_peak  left rotate by slope_angle textcolor rgb l1_color font ",12"
+set label sprintf('L2 %.1f GTXN/s', l2_peak)  at 0.05,0.6 + 0.05 * l2_peak  left rotate by slope_angle textcolor rgb l2_color font ",12"
+set label sprintf('HBM %.1f GTXN/s', hbm_peak) at inst_peak/hbm_peak, inst_peak left rotate by slope_angle textcolor rgb hbm_color font ",12"
 
 plot \
 	l1_ceiling(x) lw line_width lc rgb l1_color notitle,\
