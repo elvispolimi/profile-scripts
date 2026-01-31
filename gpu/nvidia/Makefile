@@ -9,7 +9,10 @@ KERNELS         ?=
 comma := ,
 NCU_KERNEL_NAME_BASE ?= demangled
 ROOFLINE_PRECISION ?= fp
-RAW_FILE = $(OUT_DIR)/profile.raw
+NCU_RUNS ?= 1
+NCU_WARMUP ?= 0
+RAW_FILE_PREFIX = $(OUT_DIR)/profile.raw
+RAW_FILE_STAMP = $(OUT_DIR)/profile.raw.stamp
 
 ifneq ($(strip $(KERNELS)),)
 KERNELS_REGEX := $(subst $(comma),|,$(KERNELS))
@@ -38,6 +41,8 @@ PLOTS = $(addprefix $(OUT_DIR)/,$(addsuffix .pdf,$(PLOT_NAMES)))
 PS_FILES = $(patsubst %.pdf, %.ps, $(PLOTS))
 # gnuplot data file
 DATA_FILE = $(OUT_DIR)/profile.dat
+RAW_RUNS = $(shell seq 1 $(NCU_RUNS))
+RAW_FILES = $(addprefix $(RAW_FILE_PREFIX)., $(RAW_RUNS))
 DAT_FILES = $(DATA_FILE)
 all: $(PLOTS)
 dat: $(DATA_FILE)
@@ -49,11 +54,16 @@ dp: $(addprefix $(OUT_DIR)/,$(addsuffix .pdf,$(ROOFLINE_DP_PLOTS)))
 $(OUT_DIR):
 	mkdir -p $@
 
-$(RAW_FILE): | $(OUT_DIR)
-	$(NCU) --page raw --metrics=$(METRICS) $(NCU_KERNELS_ARG) $(EXE) $(FLAGS) > $@
+$(RAW_FILE_STAMP): | $(OUT_DIR)
+	@rm -f $(RAW_FILES)
+	@i=1; while [ $$i -le $(NCU_RUNS) ]; do \
+		$(NCU) --page raw --metrics=$(METRICS) $(NCU_KERNELS_ARG) $(EXE) $(FLAGS) > $(RAW_FILE_PREFIX).$$i; \
+		i=$$((i+1)); \
+	done
+	@touch $@
 
-$(DATA_FILE): $(RAW_FILE)
-	./ncu2gnuplot --template=gnuplot.template --raw=$(RAW_FILE) --kernels="$(KERNELS)" > $@.tmp && mv $@.tmp $@
+$(DATA_FILE): $(RAW_FILE_STAMP)
+	./ncu2dat --template=gnuplot.template $(addprefix --raw=,$(RAW_FILES)) --warmup=$(NCU_WARMUP) --kernels="$(KERNELS)" > $@.tmp && mv $@.tmp $@
 
 $(OUT_DIR)/roofline-sp.ps: roofline.gnuplot $(DATA_FILE)
 	$(GNUPLOT) -e "outfile='$@';precision='$(ROOFLINE_PRECISION)'" $(DATA_FILE) $<
@@ -75,4 +85,5 @@ clean:
 		$(PLOTS) \
 		$(PS_FILES) \
 		$(DAT_FILES) \
-		$(RAW_FILE)
+		$(RAW_FILES) \
+		$(RAW_FILE_STAMP)

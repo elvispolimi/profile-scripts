@@ -33,9 +33,16 @@ parser.add_argument(
 )
 parser.add_argument(
     "--raw",
+    action="append",
     type=argparse.FileType("r"),
     default=None,
-    help="Raw NCU report from --page raw --section SpeedOfLight_HierarchicalSingleRooflineChart",
+    help="Raw NCU report from --page raw --section SpeedOfLight_HierarchicalSingleRooflineChart (repeatable)",
+)
+parser.add_argument(
+    "--warmup",
+    type=int,
+    default=0,
+    help="Number of initial raw runs to discard when averaging",
 )
 
 
@@ -305,6 +312,16 @@ def accumulate(d):
     return {k: mean(v) for k, v in d.items()}
 
 
+def average_dicts(dicts):
+    totals = defaultdict(float)
+    counts = defaultdict(int)
+    for d in dicts:
+        for k, v in d.items():
+            totals[k] += v
+            counts[k] += 1
+    return {k: totals[k] / counts[k] for k in totals}
+
+
 def parse_kernels(arg):
     return [k.strip() for k in arg.split(",") if k.strip()]
 
@@ -543,9 +560,19 @@ if __name__ == "__main__":
     if args.input:
         data = transform(args.input, kernels)
     else:
-        metrics, units = parse_raw_metrics(args.raw, kernels)
-        data = raw_to_data(metrics, units)
-        peaks = peaks_from_raw(metrics, units)
+        raw_files = args.raw or []
+        if args.warmup:
+            raw_files = raw_files[args.warmup :]
+        if not raw_files:
+            raise ValueError("No raw runs remaining after warmup")
+        data_runs = []
+        peaks_runs = []
+        for raw_file in raw_files:
+            metrics, units = parse_raw_metrics(raw_file, kernels)
+            data_runs.append(raw_to_data(metrics, units))
+            peaks_runs.append(peaks_from_raw(metrics, units))
+        data = average_dicts(data_runs)
+        peaks = average_dicts(peaks_runs)
     template = args.template.read()
     output = template.format(**data)
     instmix_line = (
@@ -555,7 +582,7 @@ if __name__ == "__main__":
     )
     output = output + "\n$instmix << EOD\n" + instmix_line + "\nEOD\n"
     if args.raw and args.input:
-        metrics, units = parse_raw_metrics(args.raw, kernels)
+        metrics, units = parse_raw_metrics(args.raw[0], kernels)
         peaks = peaks_from_raw(metrics, units)
     if peaks:
         extra = "\n".join(f"{k} = {v}" for k, v in peaks.items())

@@ -45,6 +45,8 @@ listed in `METRICS`.
 - `NCU_KERNEL_NAME_BASE`: base name used by NCU for matching kernels (default: `demangled`).
 - `METRICSFILE`: path to the metrics list (default: `METRICS`).
 - `ROOFLINE_PRECISION`: peak selection for roofline (`fp` or `dp`, default: `fp`).
+- `NCU_RUNS`: number of NCU runs to capture (default: `1`).
+- `NCU_WARMUP`: number of initial runs to discard when averaging (default: `0`).
 
 Example:
 
@@ -54,8 +56,8 @@ make EXE=/home/user/bin/my_app FLAGS="--size 1024" OUT_DIR=build KERNELS=kernelA
 
 ## How data flows
 
-1. `ncu --page raw --metrics=$(METRICS)` writes `out/profile.raw`.
-2. `ncu2gnuplot` generates a single `out/profile.dat` that includes all plot variables and an `instmix` data block.
+1. `ncu --page raw --metrics=$(METRICS)` writes `out/profile.raw.<run>` for each run.
+2. `ncu2dat` generates a single `out/profile.dat` that includes all plot variables and an `instmix` data block, averaging over runs after warmup discard.
 3. Gnuplot renders `.ps`, then `ps2pdf` produces the final PDFs.
 
 If you need to re-capture profiling data, remove `out/profile.raw` or run
