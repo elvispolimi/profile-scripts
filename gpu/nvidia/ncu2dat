@@ -316,16 +316,8 @@ def canonicalize(d, tensor_flop_factor):
     }
 
 
-def mean(data):
-    try:
-        return statistics.geometric_mean(data)
-    except statistics.StatisticsError:
-        # With empty series or series with just zeros
-        return 0.0
-
-
 def accumulate(d):
-    return {k: mean(v) for k, v in d.items()}
+    return {k: sum(v) for k, v in d.items()}
 
 
 def average_dicts(dicts):
@@ -336,6 +328,14 @@ def average_dicts(dicts):
             totals[k] += v
             counts[k] += 1
     return {k: totals[k] / counts[k] for k in totals}
+
+
+def sum_dicts(dicts):
+    totals = defaultdict(float)
+    for d in dicts:
+        for k, v in d.items():
+            totals[k] += v
+    return dict(totals)
 
 
 def parse_kernels(arg):
@@ -482,7 +482,7 @@ def data_to_roofline_vars(data):
     }
 
 
-def average_kernel_dicts(dicts, kernel_order):
+def sum_kernel_dicts(dicts, kernel_order):
     merged = {}
     for kernel in kernel_order:
         per_kernel = []
@@ -490,7 +490,7 @@ def average_kernel_dicts(dicts, kernel_order):
             if kernel in d:
                 per_kernel.append(d[kernel])
         if per_kernel:
-            merged[kernel] = average_dicts(per_kernel)
+            merged[kernel] = sum_dicts(per_kernel)
     return merged
 
 
@@ -745,7 +745,7 @@ if __name__ == "__main__":
                         metrics_by_kernel[first_kernel], units_by_kernel[first_kernel]
                     )
                 )
-        data_by_kernel = average_kernel_dicts(data_runs, kernel_order)
+        data_by_kernel = sum_kernel_dicts(data_runs, kernel_order)
         peaks = average_dicts(peaks_runs)
     template = args.template.read()
     if not data_by_kernel:
