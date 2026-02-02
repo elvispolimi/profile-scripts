@@ -41,7 +41,7 @@ listed in `METRICS`.
 - `EXE` (required): path to the executable to profile. Prefer absolute paths.
 - `FLAGS`: extra arguments passed to the executable.
 - `OUT_DIR`: output directory (default: `out`).
-- `KERNELS` (required): comma-separated list of kernel name substrings to include; also passed to NCU via `--kernel-name` to profile only those kernels.
+- `KERNELS` (required): comma-separated list of kernel name substrings to include; also passed to NCU via `--kernel-name` to profile only those kernels. These substrings are also used as the labels in the generated `.dat` file.
 - `NCU_KERNEL_NAME_BASE`: base name used by NCU for matching kernels (default: `demangled`).
 - `METRICSFILE`: path to the metrics list (default: `METRICS`).
 - `ROOFLINE_PRECISION`: peak selection for roofline (`fp` or `dp`, default: `fp`).

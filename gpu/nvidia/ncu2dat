@@ -326,22 +326,43 @@ def parse_kernels(arg):
     return [k.strip() for k in arg.split(",") if k.strip()]
 
 
+def match_kernel(name, kernels):
+    return any(k in name for k in kernels)
+
+def kernel_label(name, kernels):
+    for k in kernels:
+        if k in name:
+            return k
+    return None
+
+
 def transform(f, kernels):
     r = csv.DictReader(f, delimiter=",", quotechar='"')
-    d = defaultdict(list)
+    metrics_by_kernel = defaultdict(lambda: defaultdict(list))
+    kernel_order = []
     for row in r:
-        if not any(k in row["Kernel Name"] for k in kernels):
+        kernel_name = row["Kernel Name"]
+        label = kernel_label(kernel_name, kernels)
+        if label is None:
             continue
-        k = row["Metric Name"]
-        v = float(row["Metric Value"].replace(",", ""))
-        d[k].append(v)
-    return canonicalize(accumulate(d))
+        if label not in metrics_by_kernel:
+            kernel_order.append(label)
+        metric_name = row["Metric Name"]
+        value = float(row["Metric Value"].replace(",", ""))
+        metrics_by_kernel[label][metric_name].append(value)
+    data_by_kernel = {}
+    for kernel_name, metrics in metrics_by_kernel.items():
+        data_by_kernel[kernel_name] = canonicalize(accumulate(metrics))
+    return data_by_kernel, kernel_order
 
 
 def parse_raw_metrics(f, kernels):
-    metrics = defaultdict(list)
-    units = {}
+    metrics_by_kernel = defaultdict(lambda: defaultdict(list))
+    units_by_kernel = defaultdict(dict)
+    kernel_order = []
     active = False
+    active_kernel = None
+    active_label = None
     for line in f:
         stripped = line.strip()
         if not stripped:
@@ -349,7 +370,11 @@ def parse_raw_metrics(f, kernels):
         if stripped.startswith(("==PROF==", "[", "Metric Name", "---")):
             continue
         if stripped.startswith("void "):
-            active = any(k in stripped for k in kernels)
+            active_kernel = stripped
+            active_label = kernel_label(stripped, kernels)
+            active = active_label is not None
+            if active and active_label not in metrics_by_kernel:
+                kernel_order.append(active_label)
             continue
         if "__" not in stripped:
             continue
@@ -363,10 +388,103 @@ def parse_raw_metrics(f, kernels):
             value = float(value_str)
         except ValueError:
             continue
-        if active:
-            metrics[name].append(value)
-            units[name] = unit
-    return accumulate(metrics), units
+        if active and active_label:
+            metrics_by_kernel[active_label][name].append(value)
+            units_by_kernel[active_label][name] = unit
+    accumulated = {}
+    for kernel_name, metrics in metrics_by_kernel.items():
+        accumulated[kernel_name] = accumulate(metrics)
+    return accumulated, units_by_kernel, kernel_order
+
+
+CANONICAL_KEYS = [
+    "elapsed_s",
+    "dram_bytes",
+    "l2_bytes",
+    "l1_bytes",
+    "flop",
+    "scalar_flop",
+    "fp_flop",
+    "dp_flop",
+    "tensor_flop",
+    "thread_instructions",
+    "l1_global_transactions",
+    "l1_shared_transactions",
+    "l2_transactions",
+    "dram_transactions",
+    "warp_instructions",
+    "l1_total_32B_transactions",
+    "warp_global_ld_st_instructions",
+    "warp_shared_ld_st_instructions",
+    "warp_shared_transactions",
+    "fp_instructions",
+    "int_instructions",
+    "mem_instructions",
+    "cf_instructions",
+    "threadcomm_instructions",
+    "misc_instructions",
+    "tot_instructions",
+    "fp_instructions_pct",
+    "int_instructions_pct",
+    "mem_instructions_pct",
+    "cf_instructions_pct",
+    "threadcomm_instructions_pct",
+    "misc_instructions_pct",
+    "peak_occupancy_margin_pct",
+    "sustained_occupancy_pct",
+    "efficiency",
+    "flops",
+]
+
+
+def safe_div(numerator, denominator):
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
+def data_to_roofline_vars(data):
+    elapsed_s = data["elapsed_s"]
+    sp_perf = safe_div(data["fp_flop"], elapsed_s * 1000000000.0)
+    dp_perf = safe_div(data["dp_flop"], elapsed_s * 1000000000.0)
+    inst_perf = safe_div(data["thread_instructions"], elapsed_s * 1000000000.0)
+    return {
+        "sp_perf": sp_perf,
+        "dp_perf": dp_perf,
+        "inst_perf": inst_perf,
+        "l1_sp_intensity": safe_div(data["fp_flop"], data["l1_bytes"]),
+        "l2_sp_intensity": safe_div(data["fp_flop"], data["l2_bytes"]),
+        "hbm_sp_intensity": safe_div(data["fp_flop"], data["dram_bytes"]),
+        "l1_dp_intensity": safe_div(data["dp_flop"], data["l1_bytes"]),
+        "l2_dp_intensity": safe_div(data["dp_flop"], data["l2_bytes"]),
+        "hbm_dp_intensity": safe_div(data["dp_flop"], data["dram_bytes"]),
+        "l1_inst_intensity": safe_div(
+            data["thread_instructions"], data["l1_total_32B_transactions"]
+        ),
+        "l2_inst_intensity": safe_div(data["thread_instructions"], data["l2_transactions"]),
+        "hbm_inst_intensity": safe_div(data["thread_instructions"], data["dram_transactions"]),
+    }
+
+
+def average_kernel_dicts(dicts, kernel_order):
+    merged = {}
+    for kernel in kernel_order:
+        per_kernel = []
+        for d in dicts:
+            if kernel in d:
+                per_kernel.append(d[kernel])
+        if per_kernel:
+            merged[kernel] = average_dicts(per_kernel)
+    return merged
+
+
+def kernel_point_types(count):
+    points = [5, 7, 9, 11, 13, 3, 4, 6, 8, 10, 12, 14]
+    return [points[i % len(points)] for i in range(count)]
+
+
+def escape_gnuplot_string(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def per_second_to_gbps(value, unit):
@@ -558,7 +676,7 @@ if __name__ == "__main__":
     kernels = parse_kernels(args.kernels)
     peaks = {}
     if args.input:
-        data = transform(args.input, kernels)
+        data_by_kernel, kernel_order = transform(args.input, kernels)
     else:
         raw_files = args.raw or []
         if args.warmup:
@@ -567,26 +685,111 @@ if __name__ == "__main__":
             raise ValueError("No raw runs remaining after warmup")
         data_runs = []
         peaks_runs = []
+        kernel_order = []
         for raw_file in raw_files:
-            metrics, units = parse_raw_metrics(raw_file, kernels)
-            data_runs.append(raw_to_data(metrics, units))
-            peaks_runs.append(peaks_from_raw(metrics, units))
-        data = average_dicts(data_runs)
+            metrics_by_kernel, units_by_kernel, run_order = parse_raw_metrics(raw_file, kernels)
+            for name in run_order:
+                if name not in kernel_order:
+                    kernel_order.append(name)
+            run_data = {}
+            for kernel_name, metrics in metrics_by_kernel.items():
+                run_data[kernel_name] = raw_to_data(metrics, units_by_kernel[kernel_name])
+            data_runs.append(run_data)
+            if run_order:
+                first_kernel = run_order[0]
+                peaks_runs.append(
+                    peaks_from_raw(
+                        metrics_by_kernel[first_kernel], units_by_kernel[first_kernel]
+                    )
+                )
+        data_by_kernel = average_kernel_dicts(data_runs, kernel_order)
         peaks = average_dicts(peaks_runs)
     template = args.template.read()
-    output = template.format(**data)
-    instmix_line = (
-        f"exe {data['misc_instructions_pct']} {data['threadcomm_instructions_pct']} "
-        f"{data['cf_instructions_pct']} {data['mem_instructions_pct']} "
-        f"{data['int_instructions_pct']} {data['fp_instructions_pct']}"
-    )
-    output = output + "\n$instmix << EOD\n" + instmix_line + "\nEOD\n"
+    if not data_by_kernel:
+        raise ValueError("No kernels matched the provided list")
+    primary_kernel = kernel_order[0]
+    primary_data = data_by_kernel[primary_kernel]
+    output = template.format(**primary_data)
+    instmix_lines = []
+    for kernel_name in kernel_order:
+        data = data_by_kernel[kernel_name]
+        escaped_name = escape_gnuplot_string(kernel_name)
+        instmix_lines.append(
+            f"\"{escaped_name}\" {data['misc_instructions_pct']} {data['threadcomm_instructions_pct']} "
+            f"{data['cf_instructions_pct']} {data['mem_instructions_pct']} "
+            f"{data['int_instructions_pct']} {data['fp_instructions_pct']}"
+        )
+    output = output + "\n$instmix << EOD\n" + "\n".join(instmix_lines) + "\nEOD\n"
     if args.raw and args.input:
-        metrics, units = parse_raw_metrics(args.raw[0], kernels)
-        peaks = peaks_from_raw(metrics, units)
+        metrics_by_kernel, units_by_kernel, run_order = parse_raw_metrics(args.raw[0], kernels)
+        if run_order:
+            peaks = peaks_from_raw(
+                metrics_by_kernel[run_order[0]], units_by_kernel[run_order[0]]
+            )
     if peaks:
         extra = "\n".join(f"{k} = {v}" for k, v in peaks.items())
         output = output + "\n" + extra
+    output = output + "\n"
+    output = output + f"kernel_count = {len(kernel_order)}\n"
+    point_types = kernel_point_types(len(kernel_order))
+    roofline_sp_points = []
+    roofline_dp_points = []
+    roofline_inst_points = []
+    data_block = []
+    data_block.append("# kernel " + " ".join(CANONICAL_KEYS))
+    for idx, kernel_name in enumerate(kernel_order):
+        data = data_by_kernel[kernel_name]
+        vars = data_to_roofline_vars(data)
+        name_key = f"kernel_name_{idx}"
+        point_key = f"kernel_point_{idx}"
+        escaped_name = escape_gnuplot_string(kernel_name)
+        output = output + f"{name_key} = \"{escaped_name}\"\n"
+        output = output + f"{point_key} = {point_types[idx]}\n"
+        for key, value in vars.items():
+            output = output + f"k{idx}_{key} = {value}\n"
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_sp_intensity):(k{idx}_sp_perf) "
+            f"with points lc rgb l1_color pt {point_key} ps point_size title {name_key}"
+        )
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_sp_intensity):(k{idx}_sp_perf) "
+            f"with points lc rgb l2_color pt {point_key} ps point_size notitle"
+        )
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_sp_intensity):(k{idx}_sp_perf) "
+            f"with points lc rgb hbm_color pt {point_key} ps point_size notitle"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_dp_intensity):(k{idx}_dp_perf) "
+            f"with points lc rgb l1_color pt {point_key} ps point_size title {name_key}"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_dp_intensity):(k{idx}_dp_perf) "
+            f"with points lc rgb l2_color pt {point_key} ps point_size notitle"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_dp_intensity):(k{idx}_dp_perf) "
+            f"with points lc rgb hbm_color pt {point_key} ps point_size notitle"
+        )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_inst_intensity):(k{idx}_inst_perf) "
+            f"with points lc rgb l1_color pt {point_key} ps point_size title {name_key}"
+        )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_inst_intensity):(k{idx}_inst_perf) "
+            f"with points lc rgb l2_color pt {point_key} ps point_size notitle"
+        )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_inst_intensity):(k{idx}_inst_perf) "
+            f"with points lc rgb hbm_color pt {point_key} ps point_size notitle"
+        )
+        row_values = [escaped_name] + [str(data.get(k, 0.0)) for k in CANONICAL_KEYS]
+        quoted = [f"\"{row_values[0]}\""] + row_values[1:]
+        data_block.append(" ".join(quoted))
+    output = output + "\nroofline_sp_points = \"" + ", ".join(roofline_sp_points) + "\"\n"
+    output = output + "\nroofline_dp_points = \"" + ", ".join(roofline_dp_points) + "\"\n"
+    output = output + "\nroofline_inst_points = \"" + ", ".join(roofline_inst_points) + "\"\n"
+    output = output + "\n$kernel_stats << EOD\n" + "\n".join(data_block) + "\nEOD\n"
     print(output)
     # else:
     #     print("\n".join(f"{k} = {v}" for k, v in data.items()))
