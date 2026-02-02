@@ -18,6 +18,7 @@ make -C gpu/amd plot KERNELS=kernelA,kernelB
 Outputs:
 - `gpu/amd/out/profile.dat`
 - `gpu/amd/out/roofline-fp32.pdf`
+- `gpu/amd/out/instmix.pdf` (if instruction mix counters are available)
 
 ## Common variables
 - `KERNELS` (required): comma-separated kernel name substrings used to group and label kernels.
@@ -28,6 +29,7 @@ Outputs:
 - `PROFILER_ARGS`: extra profiler args (e.g., device selection).
 - `PROFILER_CMD`: full command override if you want a custom invocation.
 - `ROOFLINE_PRECISION`: `fp32` or `fp64`.
+- `ROOF_ONLY`: set to `0` to enable full profiling (required for instruction mix).
 
 ## Notes
 - `omniperf2dat` tries to find common column names in `pmc_perf.csv` / `roofline.csv`. If it fails, it prints the headers it found and suggests the missing columns.
@@ -39,4 +41,12 @@ make -C gpu/amd profile \
   PROFILER=omniperf \
   PROFILER_CMD="omniperf profile -n profile -- /path/to/your/exe --args" \
   KERNELS=kernelA,kernelB
+```
+
+## Instruction mix
+To generate instmix plots, run with full profiling and then:
+```bash
+make -C gpu/amd profile ROOF_ONLY=0 KERNELS=kernelA,kernelB
+make -C gpu/amd dat KERNELS=kernelA,kernelB
+make -C gpu/amd instmix
 ```

@@ -179,6 +179,32 @@ def collect_kernel_metrics(rows, headers, kernels, args):
         args.hbm_bytes_col,
     )
 
+    insts_col = find_col(headers, ["SQ_INSTS", "Insts", "Instructions"], None)
+    branch_col = find_col(headers, ["SQ_INSTS_BRANCH", "Insts Branch"], None)
+    smem_col = find_col(headers, ["SQ_INSTS_SMEM"], None)
+    lds_col = find_col(headers, ["SQ_INSTS_LDS"], None)
+    vmem_rd_col = find_col(headers, ["SQ_INSTS_VMEM_RD"], None)
+    vmem_wr_col = find_col(headers, ["SQ_INSTS_VMEM_WR"], None)
+    valu_col = find_col(headers, ["SQ_INSTS_VALU"], None)
+    valu_i32_col = find_col(headers, ["SQ_INSTS_VALU_INT32"], None)
+    valu_i64_col = find_col(headers, ["SQ_INSTS_VALU_INT64"], None)
+    valu_cvt_col = find_col(headers, ["SQ_INSTS_VALU_CVT"], None)
+    valu_f16_add_col = find_col(headers, ["SQ_INSTS_VALU_ADD_F16"], None)
+    valu_f16_mul_col = find_col(headers, ["SQ_INSTS_VALU_MUL_F16"], None)
+    valu_f16_fma_col = find_col(headers, ["SQ_INSTS_VALU_FMA_F16"], None)
+    valu_f32_add_col = find_col(headers, ["SQ_INSTS_VALU_ADD_F32"], None)
+    valu_f32_mul_col = find_col(headers, ["SQ_INSTS_VALU_MUL_F32"], None)
+    valu_f32_fma_col = find_col(headers, ["SQ_INSTS_VALU_FMA_F32"], None)
+    valu_f64_add_col = find_col(headers, ["SQ_INSTS_VALU_ADD_F64"], None)
+    valu_f64_mul_col = find_col(headers, ["SQ_INSTS_VALU_MUL_F64"], None)
+    valu_f64_fma_col = find_col(headers, ["SQ_INSTS_VALU_FMA_F64"], None)
+    mfma_col = find_col(headers, ["SQ_INSTS_MFMA"], None)
+    mfma_f16_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_F16"], None)
+    mfma_bf16_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_BF16"], None)
+    mfma_f32_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_F32"], None)
+    mfma_f64_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_F64"], None)
+    mfma_i8_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_I8"], None)
+
     data = defaultdict(lambda: defaultdict(float))
     counts = defaultdict(int)
 
@@ -223,6 +249,60 @@ def collect_kernel_metrics(rows, headers, kernels, args):
             val = parse_number(row.get(hbm_bytes_col))
             if val is not None:
                 data[label]["hbm_bytes"] += val
+
+        # Instruction mix (AMD SQ_INSTS_* counters)
+        insts = parse_number(row.get(insts_col)) if insts_col else None
+        if insts is not None:
+            data[label]["insts"] += insts
+
+        mem_inst = 0.0
+        for col in (smem_col, lds_col, vmem_rd_col, vmem_wr_col):
+            val = parse_number(row.get(col)) if col else None
+            if val is not None:
+                mem_inst += val
+        if mem_inst:
+            data[label]["mem_inst"] += mem_inst
+
+        cf_inst = parse_number(row.get(branch_col)) if branch_col else None
+        if cf_inst is not None:
+            data[label]["cf_inst"] += cf_inst
+
+        int_inst = 0.0
+        for col in (valu_i32_col, valu_i64_col):
+            val = parse_number(row.get(col)) if col else None
+            if val is not None:
+                int_inst += val
+        if int_inst:
+            data[label]["int_inst"] += int_inst
+
+        fp_inst = 0.0
+        for col in (
+            valu_f16_add_col,
+            valu_f16_mul_col,
+            valu_f16_fma_col,
+            valu_f32_add_col,
+            valu_f32_mul_col,
+            valu_f32_fma_col,
+            valu_f64_add_col,
+            valu_f64_mul_col,
+            valu_f64_fma_col,
+            mfma_col,
+            mfma_f16_col,
+            mfma_bf16_col,
+            mfma_f32_col,
+            mfma_f64_col,
+            mfma_i8_col,
+        ):
+            val = parse_number(row.get(col)) if col else None
+            if val is not None:
+                fp_inst += val
+        if fp_inst:
+            data[label]["fp_inst"] += fp_inst
+
+        if valu_cvt_col:
+            val = parse_number(row.get(valu_cvt_col))
+            if val is not None:
+                data[label]["misc_inst"] += val
 
         if l1_ai_col:
             val = parse_number(row.get(l1_ai_col))
@@ -306,6 +386,7 @@ def main():
     point_types = kernel_point_types(len(kernel_order))
     roofline_sp_points = []
     roofline_dp_points = []
+    instmix_lines = []
 
     for idx, kernel_name in enumerate(kernel_order):
         d = data[kernel_name]
@@ -373,8 +454,31 @@ def main():
             f"with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
         )
 
+        insts = d.get("insts", 0.0)
+        if insts > 0:
+            fp_inst = d.get("fp_inst", 0.0)
+            int_inst = d.get("int_inst", 0.0)
+            mem_inst = d.get("mem_inst", 0.0)
+            cf_inst = d.get("cf_inst", 0.0)
+            misc_inst = d.get("misc_inst", 0.0)
+            threadcomm_inst = 0.0
+            known = fp_inst + int_inst + mem_inst + cf_inst + misc_inst + threadcomm_inst
+            if known < insts:
+                misc_inst += insts - known
+            denom = insts if insts else 1.0
+            instmix_lines.append(
+                f"\"{escaped_name}\" "
+                f"{(misc_inst / denom) * 100:.1f} {(threadcomm_inst / denom) * 100:.1f} "
+                f"{(cf_inst / denom) * 100:.1f} {(mem_inst / denom) * 100:.1f} "
+                f"{(int_inst / denom) * 100:.1f} {(fp_inst / denom) * 100:.1f}"
+            )
+
     print("\nroofline_sp_points = \"" + ", ".join(roofline_sp_points) + "\"")
     print("\nroofline_dp_points = \"" + ", ".join(roofline_dp_points) + "\"")
+    if instmix_lines:
+        print("\n$instmix << EOD")
+        print("\n".join(instmix_lines))
+        print("EOD")
 
 
 if __name__ == "__main__":
