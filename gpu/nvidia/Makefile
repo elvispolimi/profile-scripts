@@ -8,6 +8,7 @@ OUT_DIR         ?= out
 KERNELS         ?=
 comma := ,
 NCU_KERNEL_NAME_BASE ?= demangled
+NCU2DAT_ARGS   ?=
 ROOFLINE_PRECISION ?= fp
 NCU_RUNS ?= 1
 NCU_WARMUP ?= 0
@@ -63,7 +64,7 @@ $(RAW_FILE_STAMP): | $(OUT_DIR)
 	@touch $@
 
 $(DATA_FILE): $(RAW_FILE_STAMP)
-	./ncu2dat --template=gnuplot.template $(addprefix --raw=,$(RAW_FILES)) --warmup=$(NCU_WARMUP) --kernels="$(KERNELS)" > $@.tmp && mv $@.tmp $@
+	./ncu2dat --template=gnuplot.template $(addprefix --raw=,$(RAW_FILES)) --warmup=$(NCU_WARMUP) --kernels="$(KERNELS)" $(NCU2DAT_ARGS) > $@.tmp && mv $@.tmp $@
 
 $(OUT_DIR)/roofline-sp.ps: roofline.gnuplot $(DATA_FILE)
 	$(GNUPLOT) -e "outfile='$@';precision='$(ROOFLINE_PRECISION)'" $(DATA_FILE) $<

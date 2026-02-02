@@ -44,6 +44,22 @@ parser.add_argument(
     default=0,
     help="Number of initial raw runs to discard when averaging",
 )
+parser.add_argument(
+    "--tensor-flop-factor",
+    type=float,
+    default=512.0,
+    help="FLOPs per tensor instruction (architecture/precision dependent)",
+)
+parser.add_argument(
+    "--debug-ai",
+    action="store_true",
+    help="Print per-kernel AI inputs (fp_flop, l1/l2/dram bytes) to stderr",
+)
+parser.add_argument(
+    "--debug-ai-raw",
+    action="store_true",
+    help="Print raw counters used for AI/FLOP computations to stderr (raw inputs only)",
+)
 
 
 def elapsed_s(d):
@@ -64,8 +80,8 @@ def scalar_flop(d):
     )
 
 
-def tensor_flop(d):
-    return 512 * d["sm__inst_executed_pipe_tensor.sum"]
+def tensor_flop(d, tensor_flop_factor):
+    return tensor_flop_factor * d["sm__inst_executed_pipe_tensor.sum"]
 
 def dp_flop(d):
     return (
@@ -75,7 +91,7 @@ def dp_flop(d):
     )
 
 
-def fp_flop(d):
+def fp_flop(d, tensor_flop_factor):
     return (
         2 * d["sm__sass_thread_inst_executed_op_ffma_pred_on.sum"]
         + d["sm__sass_thread_inst_executed_op_fmul_pred_on.sum"]
@@ -83,12 +99,12 @@ def fp_flop(d):
         + 2 * d["sm__sass_thread_inst_executed_op_hfma_pred_on.sum"]
         + d["sm__sass_thread_inst_executed_op_hmul_pred_on.sum"]
         + d["sm__sass_thread_inst_executed_op_hadd_pred_on.sum"]
-        + tensor_flop(d)
+        + tensor_flop(d, tensor_flop_factor)
     )
 
 
-def flop(d):
-    return fp_flop(d) + dp_flop(d)
+def flop(d, tensor_flop_factor):
+    return fp_flop(d, tensor_flop_factor) + dp_flop(d)
 
 
 def thread_instructions(d):
@@ -256,11 +272,11 @@ def efficiency(d):
     return {"efficiency": thread_instructions(d) / warp_instructions(d) * 100}
 
 
-def performance(d):
-    return {"flops": flop(d) / (elapsed_s(d) * 1000000000)}
+def performance(d, tensor_flop_factor):
+    return {"flops": flop(d, tensor_flop_factor) / (elapsed_s(d) * 1000000000)}
 
 
-def canonicalize(d):
+def canonicalize(d, tensor_flop_factor):
     return {
         # Timing
         "elapsed_s": elapsed_s(d),
@@ -269,11 +285,11 @@ def canonicalize(d):
         "l2_bytes": l2_bytes(d),
         "l1_bytes": l1_bytes(d),
         # FLOP
-        "flop": flop(d),
+        "flop": flop(d, tensor_flop_factor),
         "scalar_flop": scalar_flop(d),
-        "fp_flop": fp_flop(d),
+        "fp_flop": fp_flop(d, tensor_flop_factor),
         "dp_flop": dp_flop(d),
-        "tensor_flop": tensor_flop(d),
+        "tensor_flop": tensor_flop(d, tensor_flop_factor),
         # 1. Instruction Intensity and Performance
         "thread_instructions": thread_instructions(d),
         "l1_global_transactions": l1_global_transactions(d),
@@ -296,7 +312,7 @@ def canonicalize(d):
         # Efficiency
         **efficiency(d),
         # Performance
-        **performance(d),
+        **performance(d, tensor_flop_factor),
     }
 
 
@@ -336,7 +352,7 @@ def kernel_label(name, kernels):
     return None
 
 
-def transform(f, kernels):
+def transform(f, kernels, tensor_flop_factor):
     r = csv.DictReader(f, delimiter=",", quotechar='"')
     metrics_by_kernel = defaultdict(lambda: defaultdict(list))
     kernel_order = []
@@ -352,7 +368,7 @@ def transform(f, kernels):
         metrics_by_kernel[label][metric_name].append(value)
     data_by_kernel = {}
     for kernel_name, metrics in metrics_by_kernel.items():
-        data_by_kernel[kernel_name] = canonicalize(accumulate(metrics))
+        data_by_kernel[kernel_name] = canonicalize(accumulate(metrics), tensor_flop_factor)
     return data_by_kernel, kernel_order
 
 
@@ -600,7 +616,7 @@ def peaks_from_raw(metrics, units):
     return peaks
 
 
-def raw_to_data(metrics, units):
+def raw_to_data(metrics, units, tensor_flop_factor):
     if "sm__cycles_elapsed.avg.per_second" in metrics:
         metrics["sm__cycles_elapsed.avg.per_second"] = per_second_to_hz(
             metrics["sm__cycles_elapsed.avg.per_second"],
@@ -666,7 +682,7 @@ def raw_to_data(metrics, units):
     if missing:
         missing_str = ", ".join(missing)
         raise ValueError(f"Missing required raw metrics: {missing_str}")
-    return canonicalize(metrics)
+    return canonicalize(metrics, tensor_flop_factor)
 
 
 if __name__ == "__main__":
@@ -676,7 +692,7 @@ if __name__ == "__main__":
     kernels = parse_kernels(args.kernels)
     peaks = {}
     if args.input:
-        data_by_kernel, kernel_order = transform(args.input, kernels)
+        data_by_kernel, kernel_order = transform(args.input, kernels, args.tensor_flop_factor)
     else:
         raw_files = args.raw or []
         if args.warmup:
@@ -691,9 +707,36 @@ if __name__ == "__main__":
             for name in run_order:
                 if name not in kernel_order:
                     kernel_order.append(name)
+            if args.debug_ai_raw:
+                raw_keys = [
+                    "l1tex__t_bytes.sum",
+                    "lts__t_bytes.sum",
+                    "dram__bytes.sum",
+                    "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_hmul_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_dfma_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_dmul_pred_on.sum",
+                    "sm__sass_thread_inst_executed_op_dadd_pred_on.sum",
+                    "sm__inst_executed_pipe_tensor.sum",
+                ]
+                for kernel_name, metrics in metrics_by_kernel.items():
+                    print(f"[debug-ai-raw] {kernel_name}", file=sys.stderr)
+                    for key in raw_keys:
+                        if key in metrics:
+                            unit = units_by_kernel[kernel_name].get(key, "")
+                            print(
+                                f"[debug-ai-raw] {kernel_name} {key}={metrics[key]} {unit}",
+                                file=sys.stderr,
+                            )
             run_data = {}
             for kernel_name, metrics in metrics_by_kernel.items():
-                run_data[kernel_name] = raw_to_data(metrics, units_by_kernel[kernel_name])
+                run_data[kernel_name] = raw_to_data(
+                    metrics, units_by_kernel[kernel_name], args.tensor_flop_factor
+                )
             data_runs.append(run_data)
             if run_order:
                 first_kernel = run_order[0]
@@ -739,6 +782,22 @@ if __name__ == "__main__":
     data_block.append("# kernel " + " ".join(CANONICAL_KEYS))
     for idx, kernel_name in enumerate(kernel_order):
         data = data_by_kernel[kernel_name]
+        if args.debug_ai:
+            l1 = data.get("l1_bytes", 0.0)
+            l2 = data.get("l2_bytes", 0.0)
+            hbm = data.get("dram_bytes", 0.0)
+            fp = data.get("fp_flop", 0.0)
+            print(
+                f"[debug-ai] {kernel_name} fp_flop={fp} "
+                f"l1_bytes={l1} l2_bytes={l2} dram_bytes={hbm}",
+                file=sys.stderr,
+            )
+            if l1 and l2 and hbm:
+                print(
+                    f"[debug-ai] {kernel_name} "
+                    f"l1_ai={fp / l1} l2_ai={fp / l2} hbm_ai={fp / hbm}",
+                    file=sys.stderr,
+                )
         vars = data_to_roofline_vars(data)
         name_key = f"kernel_name_{idx}"
         point_key = f"kernel_point_{idx}"
