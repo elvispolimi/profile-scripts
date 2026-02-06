@@ -60,6 +60,12 @@ parser.add_argument(
     action="store_true",
     help="Print raw counters used for AI/FLOP computations to stderr (raw inputs only)",
 )
+parser.add_argument(
+    "--arch",
+    type=int,
+    default=None,
+    help="Compute capability (e.g., 75, 80, 90) to select L1 writeback metrics",
+)
 
 
 def elapsed_s(d):
@@ -276,7 +282,41 @@ def performance(d, tensor_flop_factor):
     return {"flops": flop(d, tensor_flop_factor) / (elapsed_s(d) * 1000000000)}
 
 
-def canonicalize(d, tensor_flop_factor):
+def l1_metric_keys(arch, kind):
+    if arch is None:
+        return [
+            f"l1tex__lsu_writeback_active_mem_lgds.sum.{kind}",
+            f"l1tex__lsu_writeback_active_mem_lg.sum.{kind}",
+            f"l1tex__lsu_writeback_active.sum.{kind}",
+        ]
+    if arch >= 90:
+        return [f"l1tex__lsu_writeback_active_mem_lgds.sum.{kind}"]
+    if arch >= 75:
+        return [f"l1tex__lsu_writeback_active_mem_lg.sum.{kind}"]
+    return [f"l1tex__lsu_writeback_active.sum.{kind}"]
+
+
+def canonicalize(d, tensor_flop_factor, arch):
+    sp_flops_per_s = None
+    l1_bytes_per_s = None
+    l2_bytes_per_s = None
+    hbm_bytes_per_s = None
+    if "smsp__cycles_elapsed.avg.per_second" in d:
+        smsp_cycles_per_s = d["smsp__cycles_elapsed.avg.per_second"]
+        sp_flops_per_cycle = (
+            d.get("smsp__sass_thread_inst_executed_op_fadd_pred_on.sum.per_cycle_elapsed", 0.0)
+            + d.get("smsp__sass_thread_inst_executed_op_fmul_pred_on.sum.per_cycle_elapsed", 0.0)
+            + 2.0
+            * d.get("smsp__sass_thread_inst_executed_op_ffma_pred_on.sum.per_cycle_elapsed", 0.0)
+        )
+        sp_flops_per_s = sp_flops_per_cycle * smsp_cycles_per_s
+    l1_key, l1_val = pick_first(d, l1_metric_keys(arch, "per_second"))
+    if l1_key:
+        l1_bytes_per_s = l1_val * 128.0
+    if "lts__lts2xbar_cycles_active.sum.per_second" in d:
+        l2_bytes_per_s = d["lts__lts2xbar_cycles_active.sum.per_second"] * 32.0
+    if "dram__bytes.sum.per_second" in d:
+        hbm_bytes_per_s = d["dram__bytes.sum.per_second"]
     return {
         # Timing
         "elapsed_s": elapsed_s(d),
@@ -284,6 +324,11 @@ def canonicalize(d, tensor_flop_factor):
         "dram_bytes": dram_bytes(d),
         "l2_bytes": l2_bytes(d),
         "l1_bytes": l1_bytes(d),
+        "l1_bytes_per_s": l1_bytes_per_s,
+        "l2_bytes_per_s": l2_bytes_per_s,
+        "hbm_bytes_per_s": hbm_bytes_per_s,
+        "sp_flops_per_s": sp_flops_per_s,
+        "dp_flops_per_s": None,
         # FLOP
         "flop": flop(d, tensor_flop_factor),
         "scalar_flop": scalar_flop(d),
@@ -334,6 +379,8 @@ def sum_dicts(dicts):
     totals = defaultdict(float)
     for d in dicts:
         for k, v in d.items():
+            if v is None:
+                continue
             totals[k] += v
     return dict(totals)
 
@@ -461,19 +508,44 @@ def safe_div(numerator, denominator):
 
 def data_to_roofline_vars(data):
     elapsed_s = data["elapsed_s"]
-    sp_perf = safe_div(data["fp_flop"], elapsed_s * 1000000000.0)
-    dp_perf = safe_div(data["dp_flop"], elapsed_s * 1000000000.0)
+    sp_flops_per_s = data.get("sp_flops_per_s")
+    dp_flops_per_s = data.get("dp_flops_per_s")
+    sp_perf = (
+        safe_div(sp_flops_per_s, 1000000000.0)
+        if sp_flops_per_s is not None
+        else safe_div(data["fp_flop"], elapsed_s * 1000000000.0)
+    )
+    dp_perf = (
+        safe_div(dp_flops_per_s, 1000000000.0)
+        if dp_flops_per_s is not None
+        else safe_div(data["dp_flop"], elapsed_s * 1000000000.0)
+    )
     inst_perf = safe_div(data["thread_instructions"], elapsed_s * 1000000000.0)
+    l1_bytes_per_s = data.get("l1_bytes_per_s")
+    l2_bytes_per_s = data.get("l2_bytes_per_s")
+    hbm_bytes_per_s = data.get("hbm_bytes_per_s")
     return {
         "sp_perf": sp_perf,
         "dp_perf": dp_perf,
         "inst_perf": inst_perf,
-        "l1_sp_intensity": safe_div(data["fp_flop"], data["l1_bytes"]),
-        "l2_sp_intensity": safe_div(data["fp_flop"], data["l2_bytes"]),
-        "hbm_sp_intensity": safe_div(data["fp_flop"], data["dram_bytes"]),
-        "l1_dp_intensity": safe_div(data["dp_flop"], data["l1_bytes"]),
-        "l2_dp_intensity": safe_div(data["dp_flop"], data["l2_bytes"]),
-        "hbm_dp_intensity": safe_div(data["dp_flop"], data["dram_bytes"]),
+        "l1_sp_intensity": safe_div(sp_flops_per_s, l1_bytes_per_s)
+        if sp_flops_per_s is not None and l1_bytes_per_s is not None
+        else safe_div(data["fp_flop"], data["l1_bytes"]),
+        "l2_sp_intensity": safe_div(sp_flops_per_s, l2_bytes_per_s)
+        if sp_flops_per_s is not None and l2_bytes_per_s is not None
+        else safe_div(data["fp_flop"], data["l2_bytes"]),
+        "hbm_sp_intensity": safe_div(sp_flops_per_s, hbm_bytes_per_s)
+        if sp_flops_per_s is not None and hbm_bytes_per_s is not None
+        else safe_div(data["fp_flop"], data["dram_bytes"]),
+        "l1_dp_intensity": safe_div(dp_flops_per_s, l1_bytes_per_s)
+        if dp_flops_per_s is not None and l1_bytes_per_s is not None
+        else safe_div(data["dp_flop"], data["l1_bytes"]),
+        "l2_dp_intensity": safe_div(dp_flops_per_s, l2_bytes_per_s)
+        if dp_flops_per_s is not None and l2_bytes_per_s is not None
+        else safe_div(data["dp_flop"], data["l2_bytes"]),
+        "hbm_dp_intensity": safe_div(dp_flops_per_s, hbm_bytes_per_s)
+        if dp_flops_per_s is not None and hbm_bytes_per_s is not None
+        else safe_div(data["dp_flop"], data["dram_bytes"]),
         "l1_inst_intensity": safe_div(
             data["thread_instructions"], data["l1_total_32B_transactions"]
         ),
@@ -482,15 +554,44 @@ def data_to_roofline_vars(data):
     }
 
 
-def sum_kernel_dicts(dicts, kernel_order):
+def merge_kernel_dicts(dicts, kernel_order):
+    rate_keys = {
+        "sp_flops_per_s",
+        "dp_flops_per_s",
+        "l1_bytes_per_s",
+        "l2_bytes_per_s",
+        "hbm_bytes_per_s",
+        "flops",
+        "efficiency",
+        "peak_occupancy_margin_pct",
+        "sustained_occupancy_pct",
+    }
     merged = {}
     for kernel in kernel_order:
         per_kernel = []
         for d in dicts:
             if kernel in d:
                 per_kernel.append(d[kernel])
-        if per_kernel:
-            merged[kernel] = sum_dicts(per_kernel)
+        if not per_kernel:
+            continue
+        sums = defaultdict(float)
+        counts = defaultdict(int)
+        for d in per_kernel:
+            for k, v in d.items():
+                if v is None:
+                    continue
+                if k in rate_keys or k.endswith("_pct"):
+                    sums[k] += v
+                    counts[k] += 1
+                else:
+                    sums[k] += v
+        merged_kernel = {}
+        for k, v in sums.items():
+            if k in rate_keys or k.endswith("_pct"):
+                merged_kernel[k] = v / counts[k] if counts[k] else 0.0
+            else:
+                merged_kernel[k] = v
+        merged[kernel] = merged_kernel
     return merged
 
 
@@ -539,88 +640,157 @@ def to_bytes(value, unit):
 
 def per_second_to_hz(value, unit):
     unit = unit.lower()
-    if unit in ("ghz",):
-        return value * 1000000000.0
-    if unit in ("mhz",):
-        return value * 1000000.0
-    if unit in ("khz",):
-        return value * 1000.0
+    if unit in ("ghz", "gcycles/s", "gc/s", "gcycle/s"):
+        return value * 1000000000.0 if value < 1000000.0 else value
+    if unit in ("mhz", "mcycles/s", "mc/s", "mcycle/s"):
+        return value * 1000000.0 if value < 1000000000.0 else value
+    if unit in ("khz", "kcycles/s", "kc/s", "kcycle/s"):
+        return value * 1000.0 if value < 1000000000000.0 else value
+    if unit in ("hz", "cycles/s", "cycle/s"):
+        return value
     return value
 
 
-def peaks_from_raw(metrics, units):
+def pick_first(metrics, keys):
+    for k in keys:
+        if k in metrics:
+            return k, metrics[k]
+    return None, None
+
+
+def peaks_from_raw(metrics, units, arch):
+    def is_per_second(unit):
+        unit = unit.lower()
+        return "/s" in unit or unit.endswith("hz")
+
     peaks = {}
-    l1_key = "derived__l1tex__lsu_writeback_bytes_mem_lg.sum.per_second"
-    l2_key = "derived__lts__lts2xbar_bytes.sum.per_second"
-    hbm_key = "dram__bytes.sum.per_second"
-    l1_bytes_per_s = None
-    l2_bytes_per_s = None
-    hbm_bytes_per_s = None
-    if l1_key in metrics:
-        l1_bytes_per_s = per_second_to_bytes_per_s(metrics[l1_key], units.get(l1_key, ""))
-        peaks["l1_peak"] = l1_bytes_per_s / 1000000000.0
-    if l2_key in metrics:
-        l2_bytes_per_s = per_second_to_bytes_per_s(metrics[l2_key], units.get(l2_key, ""))
-        peaks["l2_peak"] = l2_bytes_per_s / 1000000000.0
-    if hbm_key in metrics:
-        hbm_bytes_per_s = per_second_to_bytes_per_s(metrics[hbm_key], units.get(hbm_key, ""))
-        peaks["hbm_peak"] = hbm_bytes_per_s / 1000000000.0
+    hbm_peak_key = "dram__bytes.sum.peak_sustained"
+    hbm_cycles_key = "dram__cycles_elapsed.avg.per_second"
+    l1_cycles_key = "l1tex__cycles_elapsed.avg.per_second"
+    l2_peak_key = "lts__lts2xbar_cycles_active.sum.peak_sustained"
+    l2_cycles_key = "lts__cycles_elapsed.avg.per_second"
 
-    if l1_bytes_per_s:
-        peaks["l1_peak_txn"] = (l1_bytes_per_s / 32.0) / 1000000000.0
-    if l2_bytes_per_s:
-        peaks["l2_peak_txn"] = (l2_bytes_per_s / 32.0) / 1000000000.0
-    if hbm_bytes_per_s:
-        peaks["hbm_peak_txn"] = (hbm_bytes_per_s / 32.0) / 1000000000.0
+    l1_peak_keys = l1_metric_keys(arch, "peak_sustained")
 
-    clock_khz = metrics.get("device__attribute_clock_rate")
-    if clock_khz:
-        clock_hz = clock_khz * 1000.0
-        sm_count = metrics.get("device__attribute_multiprocessor_count") or metrics.get(
-            "launch__sm_count"
+    if hbm_peak_key in metrics and hbm_cycles_key in metrics:
+        hbm_unit = units.get(hbm_peak_key, "")
+        if is_per_second(hbm_unit):
+            peaks["hbm_peak"] = per_second_to_gbps(metrics[hbm_peak_key], hbm_unit)
+        else:
+            hbm_cycles_per_s = per_second_to_hz(
+                metrics[hbm_cycles_key], units.get(hbm_cycles_key, "")
+            )
+            hbm_bytes_per_cycle = metrics[hbm_peak_key]
+            hbm_bytes_per_s = hbm_bytes_per_cycle * hbm_cycles_per_s
+            peaks["hbm_peak"] = hbm_bytes_per_s / 1000000000.0
+    l1_peak_key, l1_peak_val = pick_first(metrics, l1_peak_keys)
+    if l1_peak_key and l1_cycles_key in metrics:
+        l1_unit = units.get(l1_peak_key, "")
+        if is_per_second(l1_unit):
+            peaks["l1_peak"] = per_second_to_gbps(l1_peak_val * 128.0, l1_unit)
+        else:
+            l1_cycles_per_s = per_second_to_hz(
+                metrics[l1_cycles_key], units.get(l1_cycles_key, "")
+            )
+            l1_bytes_per_s = (l1_peak_val * 128.0) * l1_cycles_per_s
+            peaks["l1_peak"] = l1_bytes_per_s / 1000000000.0
+    if l2_peak_key in metrics and l2_cycles_key in metrics:
+        l2_unit = units.get(l2_peak_key, "")
+        if is_per_second(l2_unit):
+            peaks["l2_peak"] = per_second_to_gbps(metrics[l2_peak_key] * 32.0, l2_unit)
+        else:
+            l2_cycles_per_s = per_second_to_hz(
+                metrics[l2_cycles_key], units.get(l2_cycles_key, "")
+            )
+            l2_bytes_per_s = (metrics[l2_peak_key] * 32.0) * l2_cycles_per_s
+            peaks["l2_peak"] = l2_bytes_per_s / 1000000000.0
+
+    if "l1_peak" in peaks:
+        peaks["l1_peak_txn"] = peaks["l1_peak"] / 32.0
+    if "l2_peak" in peaks:
+        peaks["l2_peak_txn"] = peaks["l2_peak"] / 32.0
+    if "hbm_peak" in peaks:
+        peaks["hbm_peak_txn"] = peaks["hbm_peak"] / 32.0
+
+    sp_peak_key = "sm__sass_thread_inst_executed_op_ffma_pred_on.sum.peak_sustained"
+    dp_peak_key = "sm__sass_thread_inst_executed_op_dfma_pred_on.sum.peak_sustained"
+    sm_cycles_key = "sm__cycles_elapsed.avg.per_second"
+    if sm_cycles_key in metrics:
+        sm_cycles_per_s = per_second_to_hz(
+            metrics[sm_cycles_key], units.get(sm_cycles_key, "")
         )
-        ffma_sum = "sm__sass_thread_inst_executed_op_ffma_pred_on.sum.peak_sustained"
-        dfma_sum = "sm__sass_thread_inst_executed_op_dfma_pred_on.sum.peak_sustained"
-        ffma_avg = "sm__sass_thread_inst_executed_op_ffma_pred_on.avg.peak_sustained"
-        dfma_avg = "sm__sass_thread_inst_executed_op_dfma_pred_on.avg.peak_sustained"
-
-        fp_inst_per_cycle = None
-        dp_inst_per_cycle = None
-        if ffma_sum in metrics:
-            fp_inst_per_cycle = metrics[ffma_sum]
-        elif sm_count and ffma_avg in metrics:
-            fp_inst_per_cycle = metrics[ffma_avg] * sm_count
-        if dfma_sum in metrics:
-            dp_inst_per_cycle = metrics[dfma_sum]
-        elif sm_count and dfma_avg in metrics:
-            dp_inst_per_cycle = metrics[dfma_avg] * sm_count
-
-        if fp_inst_per_cycle:
-            peaks["peak_fp"] = fp_inst_per_cycle * clock_hz * 2.0 / 1000000000.0
+        if sp_peak_key in metrics:
+            sp_unit = units.get(sp_peak_key, "")
+            if is_per_second(sp_unit):
+                peaks["peak_fp"] = (
+                    per_second_to_hz(metrics[sp_peak_key], sp_unit) * 2.0 / 1000000000.0
+                )
+            else:
+                peaks["peak_fp"] = (
+                    metrics[sp_peak_key] * 2.0 * sm_cycles_per_s / 1000000000.0
+                )
             peaks["peak_nofma_fp"] = peaks["peak_fp"] / 2.0
-        if dp_inst_per_cycle:
-            peaks["peak_dp"] = dp_inst_per_cycle * clock_hz * 2.0 / 1000000000.0
+        if dp_peak_key in metrics:
+            dp_unit = units.get(dp_peak_key, "")
+            if is_per_second(dp_unit):
+                peaks["peak_dp"] = (
+                    per_second_to_hz(metrics[dp_peak_key], dp_unit) * 2.0 / 1000000000.0
+                )
+            else:
+                peaks["peak_dp"] = (
+                    metrics[dp_peak_key] * 2.0 * sm_cycles_per_s / 1000000000.0
+                )
             peaks["peak_nofma_dp"] = peaks["peak_dp"] / 2.0
 
-        smsp_sum = "smsp__inst_executed.sum.peak_sustained"
-        smsp_avg = "smsp__inst_executed.avg.peak_sustained"
-        sched = metrics.get("device__attribute_num_schedulers_per_multiprocessor")
-        smsp_count = sm_count * sched if sm_count and sched else None
+    smsp_cycles_key = "smsp__cycles_elapsed.avg.per_second"
+    smsp_sum_key = "smsp__inst_executed.sum.peak_sustained"
+    smsp_avg_key = "smsp__inst_executed.avg.peak_sustained"
+    if smsp_cycles_key in metrics:
+        smsp_cycles_per_s = per_second_to_hz(
+            metrics[smsp_cycles_key], units.get(smsp_cycles_key, "")
+        )
         inst_per_cycle = None
-        if smsp_sum in metrics:
-            inst_per_cycle = metrics[smsp_sum]
-        elif smsp_count and smsp_avg in metrics:
-            inst_per_cycle = metrics[smsp_avg] * smsp_count
+        if smsp_sum_key in metrics:
+            inst_per_cycle = metrics[smsp_sum_key]
+        elif smsp_avg_key in metrics:
+            sm_count = metrics.get("device__attribute_multiprocessor_count") or metrics.get(
+                "launch__sm_count"
+            )
+            sched = metrics.get("device__attribute_num_schedulers_per_multiprocessor")
+            smsp_count = sm_count * sched if sm_count and sched else None
+            if smsp_count:
+                inst_per_cycle = metrics[smsp_avg_key] * smsp_count
         if inst_per_cycle:
-            peaks["inst_peak"] = inst_per_cycle * clock_hz / 1000000000.0
+            peaks["inst_peak"] = inst_per_cycle * smsp_cycles_per_s / 1000000000.0
     return peaks
 
 
-def raw_to_data(metrics, units, tensor_flop_factor):
+def raw_to_data(metrics, units, tensor_flop_factor, arch):
     if "sm__cycles_elapsed.avg.per_second" in metrics:
         metrics["sm__cycles_elapsed.avg.per_second"] = per_second_to_hz(
             metrics["sm__cycles_elapsed.avg.per_second"],
             units.get("sm__cycles_elapsed.avg.per_second", ""),
+        )
+    if "smsp__cycles_elapsed.avg.per_second" in metrics:
+        metrics["smsp__cycles_elapsed.avg.per_second"] = per_second_to_hz(
+            metrics["smsp__cycles_elapsed.avg.per_second"],
+            units.get("smsp__cycles_elapsed.avg.per_second", ""),
+        )
+    for key in (
+        "dram__cycles_elapsed.avg.per_second",
+        "l1tex__cycles_elapsed.avg.per_second",
+        "lts__cycles_elapsed.avg.per_second",
+        "l1tex__lsu_writeback_active.sum.per_second",
+        "l1tex__lsu_writeback_active_mem_lg.sum.per_second",
+        "l1tex__lsu_writeback_active_mem_lgds.sum.per_second",
+        "lts__lts2xbar_cycles_active.sum.per_second",
+    ):
+        if key in metrics:
+            metrics[key] = per_second_to_hz(metrics[key], units.get(key, ""))
+    if "dram__bytes.sum.per_second" in metrics:
+        metrics["dram__bytes.sum.per_second"] = per_second_to_bytes_per_s(
+            metrics["dram__bytes.sum.per_second"],
+            units.get("dram__bytes.sum.per_second", ""),
         )
     if "gpu__time_duration.sum" in metrics:
         elapsed_s = metrics["gpu__time_duration.sum"] * 1e-6
@@ -643,6 +813,19 @@ def raw_to_data(metrics, units, tensor_flop_factor):
         "dram__bytes.sum",
         "lts__t_bytes.sum",
         "l1tex__t_bytes.sum",
+        "smsp__cycles_elapsed.avg.per_second",
+        "smsp__sass_thread_inst_executed_op_fadd_pred_on.sum.per_cycle_elapsed",
+        "smsp__sass_thread_inst_executed_op_fmul_pred_on.sum.per_cycle_elapsed",
+        "smsp__sass_thread_inst_executed_op_ffma_pred_on.sum.per_cycle_elapsed",
+        "lts__lts2xbar_cycles_active.sum.per_second",
+        "dram__bytes.sum.per_second",
+        "dram__bytes.sum.peak_sustained",
+        "dram__cycles_elapsed.avg.per_second",
+        # L1 per-second and peak variants are handled below (need at least one)
+        "l1tex__cycles_elapsed.avg.per_second",
+        "lts__lts2xbar_cycles_active.sum.peak_sustained",
+        "lts__cycles_elapsed.avg.per_second",
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum.peak_sustained",
         "sm__sass_thread_inst_executed_op_dfma_pred_on.sum",
         "sm__sass_thread_inst_executed_op_dmul_pred_on.sum",
         "sm__sass_thread_inst_executed_op_dadd_pred_on.sum",
@@ -679,10 +862,24 @@ def raw_to_data(metrics, units, tensor_flop_factor):
         "sm__warps_active.avg.pct_of_peak_sustained_active",
     ]
     missing = [k for k in required if k not in metrics]
+    l1_per_s_keys = l1_metric_keys(arch, "per_second")
+    l1_peak_keys = l1_metric_keys(arch, "peak_sustained")
+    if arch is None:
+        if not any(k in metrics for k in l1_per_s_keys):
+            missing.append("l1tex__lsu_writeback_active*.sum.per_second")
+        if not any(k in metrics for k in l1_peak_keys):
+            missing.append("l1tex__lsu_writeback_active*.sum.peak_sustained")
+    else:
+        for k in l1_per_s_keys:
+            if k not in metrics:
+                missing.append(k)
+        for k in l1_peak_keys:
+            if k not in metrics:
+                missing.append(k)
     if missing:
         missing_str = ", ".join(missing)
         raise ValueError(f"Missing required raw metrics: {missing_str}")
-    return canonicalize(metrics, tensor_flop_factor)
+    return canonicalize(metrics, tensor_flop_factor, arch)
 
 
 if __name__ == "__main__":
@@ -735,17 +932,19 @@ if __name__ == "__main__":
             run_data = {}
             for kernel_name, metrics in metrics_by_kernel.items():
                 run_data[kernel_name] = raw_to_data(
-                    metrics, units_by_kernel[kernel_name], args.tensor_flop_factor
+                    metrics, units_by_kernel[kernel_name], args.tensor_flop_factor, args.arch
                 )
             data_runs.append(run_data)
             if run_order:
                 first_kernel = run_order[0]
                 peaks_runs.append(
                     peaks_from_raw(
-                        metrics_by_kernel[first_kernel], units_by_kernel[first_kernel]
+                        metrics_by_kernel[first_kernel],
+                        units_by_kernel[first_kernel],
+                        args.arch,
                     )
                 )
-        data_by_kernel = sum_kernel_dicts(data_runs, kernel_order)
+        data_by_kernel = merge_kernel_dicts(data_runs, kernel_order)
         peaks = average_dicts(peaks_runs)
     template = args.template.read()
     if not data_by_kernel:
@@ -767,7 +966,9 @@ if __name__ == "__main__":
         metrics_by_kernel, units_by_kernel, run_order = parse_raw_metrics(args.raw[0], kernels)
         if run_order:
             peaks = peaks_from_raw(
-                metrics_by_kernel[run_order[0]], units_by_kernel[run_order[0]]
+                metrics_by_kernel[run_order[0]],
+                units_by_kernel[run_order[0]],
+                args.arch,
             )
     if peaks:
         extra = "\n".join(f"{k} = {v}" for k, v in peaks.items())

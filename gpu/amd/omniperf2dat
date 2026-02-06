@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+import re
+import sys
+from collections import defaultdict
+
+def parse_kernels(arg):
+    return [k.strip() for k in arg.split(",") if k.strip()]
+
+
+def kernel_label(name, kernels):
+    for k in kernels:
+        if k in name:
+            return k
+    return None
+
+
+def normalize(s):
+    return re.sub(r"[\s_\-]+", "", s.strip().lower())
+
+
+def find_col(headers, candidates, override=None):
+    if override:
+        return override
+    norm_headers = {normalize(h): h for h in headers}
+    for c in candidates:
+        key = normalize(c)
+        if key in norm_headers:
+            return norm_headers[key]
+    return None
+
+
+def parse_number(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    s = s.replace(",", "")
+    m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
+    if not m:
+        return None
+    num = float(m.group(0))
+    unit = s[m.end() :].strip().lower()
+    if unit.startswith("gb"):  # GB, GByte
+        return num * 1_000_000_000.0
+    if unit.startswith("mb"):
+        return num * 1_000_000.0
+    if unit.startswith("kb"):
+        return num * 1_000.0
+    if unit.startswith("ns"):
+        return num * 1e-9
+    if unit.startswith("us"):
+        return num * 1e-6
+    if unit.startswith("ms"):
+        return num * 1e-3
+    return num
+
+
+def read_csv(path):
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        return rows, reader.fieldnames or []
+
+
+def parse_roofline_peaks(path):
+    peaks = {}
+    if not path or not os.path.exists(path):
+        return peaks
+    rows, headers = read_csv(path)
+    if headers:
+        col_map = {
+            "hbm_peak": ["HBM BW", "HBM_BW", "HBM Bandwidth", "HBM Peak BW"],
+            "l2_peak": ["L2 BW", "L2_BW", "L2 Bandwidth", "L2 Peak BW"],
+            "l1_peak": ["L1 BW", "L1_BW", "L1 Bandwidth", "L1 Peak BW", "vL1 BW"],
+            "peak_fp": ["Peak FP32", "Peak FLOPs FP32", "FP32 Peak", "Peak GFLOP/s FP32"],
+            "peak_dp": ["Peak FP64", "Peak FLOPs FP64", "FP64 Peak", "Peak GFLOP/s FP64"],
+        }
+        for key, candidates in col_map.items():
+            col = find_col(headers, candidates)
+            if not col:
+                continue
+            best = None
+            for row in rows:
+                val = parse_number(row.get(col))
+                if val is None:
+                    continue
+                if best is None or val > best:
+                    best = val
+            if best is not None:
+                peaks[key] = best if key.startswith("peak_") else best
+        if peaks:
+            return peaks
+
+    # Fallback: key/value style parsing
+    with open(path, "r") as f:
+        for line in f:
+            lower = line.lower()
+            for key, patterns in {
+                "hbm_peak": ["hbm bw", "hbm bandwidth"],
+                "l2_peak": ["l2 bw", "l2 bandwidth"],
+                "l1_peak": ["l1 bw", "l1 bandwidth", "vl1 bw"],
+                "peak_fp": ["peak fp32", "peak flops fp32", "fp32 peak"],
+                "peak_dp": ["peak fp64", "peak flops fp64", "fp64 peak"],
+            }.items():
+                if any(p in lower for p in patterns):
+                    val = parse_number(line)
+                    if val is not None:
+                        peaks[key] = val
+    return peaks
+
+
+def collect_kernel_metrics(rows, headers, kernels, args):
+    kernel_col = find_col(
+        headers,
+        ["KernelName", "Kernel Name", "Kernel", "Name", "Kernel_Name"],
+        args.kernel_col,
+    )
+    if not kernel_col:
+        raise ValueError(f"Kernel name column not found. Headers: {headers}")
+
+    fp32_perf_col = find_col(
+        headers,
+        ["FP32 GFLOP/s", "FP32_GFLOPS", "F32 GFLOP/s", "GFLOP/s (FP32)", "FP32 Gflops"],
+        args.fp32_perf_col,
+    )
+    fp64_perf_col = find_col(
+        headers,
+        ["FP64 GFLOP/s", "FP64_GFLOPS", "F64 GFLOP/s", "GFLOP/s (FP64)", "FP64 Gflops"],
+        args.fp64_perf_col,
+    )
+
+    fp32_flop_col = find_col(
+        headers,
+        ["FP32 FLOPs", "F32 FLOPs", "FLOPs FP32", "FLOPs (FP32)", "FLOPs"],
+        args.fp32_flop_col,
+    )
+    time_col = find_col(
+        headers,
+        ["DurationNs", "Duration (ns)", "Time (ns)", "Kernel Duration (ns)", "Time (us)", "Duration (us)"],
+        args.time_col,
+    )
+
+    l1_ai_col = find_col(
+        headers,
+        ["L1 AI", "L1_AI", "AI L1", "L1 Arithmetic Intensity"],
+        args.l1_ai_col,
+    )
+    l2_ai_col = find_col(
+        headers,
+        ["L2 AI", "L2_AI", "AI L2", "L2 Arithmetic Intensity"],
+        args.l2_ai_col,
+    )
+    hbm_ai_col = find_col(
+        headers,
+        ["HBM AI", "HBM_AI", "AI HBM", "HBM Arithmetic Intensity"],
+        args.hbm_ai_col,
+    )
+
+    l1_bytes_col = find_col(
+        headers,
+        ["L1 Bytes", "L1_BYTES", "L1 Bytes (B)", "L1 Bytes (bytes)", "L1_TEX_Bytes"],
+        args.l1_bytes_col,
+    )
+    l2_bytes_col = find_col(
+        headers,
+        ["L2 Bytes", "L2_BYTES", "L2 Bytes (B)", "L2 Bytes (bytes)"],
+        args.l2_bytes_col,
+    )
+    hbm_bytes_col = find_col(
+        headers,
+        ["HBM Bytes", "HBM_BYTES", "DRAM Bytes", "DRAM_BYTES", "HBM Bytes (B)", "DRAM Bytes (B)"],
+        args.hbm_bytes_col,
+    )
+
+    insts_col = find_col(headers, ["SQ_INSTS", "Insts", "Instructions"], None)
+    branch_col = find_col(headers, ["SQ_INSTS_BRANCH", "Insts Branch"], None)
+    smem_col = find_col(headers, ["SQ_INSTS_SMEM"], None)
+    lds_col = find_col(headers, ["SQ_INSTS_LDS"], None)
+    vmem_rd_col = find_col(headers, ["SQ_INSTS_VMEM_RD"], None)
+    vmem_wr_col = find_col(headers, ["SQ_INSTS_VMEM_WR"], None)
+    valu_col = find_col(headers, ["SQ_INSTS_VALU"], None)
+    valu_i32_col = find_col(headers, ["SQ_INSTS_VALU_INT32"], None)
+    valu_i64_col = find_col(headers, ["SQ_INSTS_VALU_INT64"], None)
+    valu_cvt_col = find_col(headers, ["SQ_INSTS_VALU_CVT"], None)
+    valu_f16_add_col = find_col(headers, ["SQ_INSTS_VALU_ADD_F16"], None)
+    valu_f16_mul_col = find_col(headers, ["SQ_INSTS_VALU_MUL_F16"], None)
+    valu_f16_fma_col = find_col(headers, ["SQ_INSTS_VALU_FMA_F16"], None)
+    valu_f32_add_col = find_col(headers, ["SQ_INSTS_VALU_ADD_F32"], None)
+    valu_f32_mul_col = find_col(headers, ["SQ_INSTS_VALU_MUL_F32"], None)
+    valu_f32_fma_col = find_col(headers, ["SQ_INSTS_VALU_FMA_F32"], None)
+    valu_f64_add_col = find_col(headers, ["SQ_INSTS_VALU_ADD_F64"], None)
+    valu_f64_mul_col = find_col(headers, ["SQ_INSTS_VALU_MUL_F64"], None)
+    valu_f64_fma_col = find_col(headers, ["SQ_INSTS_VALU_FMA_F64"], None)
+    mfma_col = find_col(headers, ["SQ_INSTS_MFMA"], None)
+    mfma_f16_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_F16"], None)
+    mfma_bf16_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_BF16"], None)
+    mfma_f32_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_F32"], None)
+    mfma_f64_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_F64"], None)
+    mfma_i8_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_I8"], None)
+
+    data = defaultdict(lambda: defaultdict(float))
+    counts = defaultdict(int)
+
+    for row in rows:
+        kernel_name = row.get(kernel_col, "")
+        label = kernel_label(kernel_name, kernels)
+        if label is None:
+            continue
+
+        # Prefer totals if available
+        flop = parse_number(row.get(fp32_flop_col)) if fp32_flop_col else None
+        time_val = parse_number(row.get(time_col)) if time_col else None
+        if time_val is not None and time_col and "us" in time_col.lower():
+            time_val *= 1e-6
+        if time_val is not None and time_col and "ns" in time_col.lower():
+            time_val *= 1e-9
+
+        if flop is not None and time_val:
+            data[label]["fp32_flop"] += flop
+            data[label]["time_s"] += time_val
+        elif fp32_perf_col:
+            perf = parse_number(row.get(fp32_perf_col))
+            if perf is not None:
+                data[label]["fp32_perf_sum"] += perf
+                data[label]["fp32_perf_count"] += 1
+
+        if fp64_perf_col:
+            perf = parse_number(row.get(fp64_perf_col))
+            if perf is not None:
+                data[label]["fp64_perf_sum"] += perf
+                data[label]["fp64_perf_count"] += 1
+
+        if l1_bytes_col:
+            val = parse_number(row.get(l1_bytes_col))
+            if val is not None:
+                data[label]["l1_bytes"] += val
+        if l2_bytes_col:
+            val = parse_number(row.get(l2_bytes_col))
+            if val is not None:
+                data[label]["l2_bytes"] += val
+        if hbm_bytes_col:
+            val = parse_number(row.get(hbm_bytes_col))
+            if val is not None:
+                data[label]["hbm_bytes"] += val
+
+        # Instruction mix (AMD SQ_INSTS_* counters)
+        insts = parse_number(row.get(insts_col)) if insts_col else None
+        if insts is not None:
+            data[label]["insts"] += insts
+
+        mem_inst = 0.0
+        for col in (smem_col, lds_col, vmem_rd_col, vmem_wr_col):
+            val = parse_number(row.get(col)) if col else None
+            if val is not None:
+                mem_inst += val
+        if mem_inst:
+            data[label]["mem_inst"] += mem_inst
+
+        cf_inst = parse_number(row.get(branch_col)) if branch_col else None
+        if cf_inst is not None:
+            data[label]["cf_inst"] += cf_inst
+
+        int_inst = 0.0
+        for col in (valu_i32_col, valu_i64_col):
+            val = parse_number(row.get(col)) if col else None
+            if val is not None:
+                int_inst += val
+        if int_inst:
+            data[label]["int_inst"] += int_inst
+
+        fp_inst = 0.0
+        for col in (
+            valu_f16_add_col,
+            valu_f16_mul_col,
+            valu_f16_fma_col,
+            valu_f32_add_col,
+            valu_f32_mul_col,
+            valu_f32_fma_col,
+            valu_f64_add_col,
+            valu_f64_mul_col,
+            valu_f64_fma_col,
+            mfma_col,
+            mfma_f16_col,
+            mfma_bf16_col,
+            mfma_f32_col,
+            mfma_f64_col,
+            mfma_i8_col,
+        ):
+            val = parse_number(row.get(col)) if col else None
+            if val is not None:
+                fp_inst += val
+        if fp_inst:
+            data[label]["fp_inst"] += fp_inst
+
+        if valu_cvt_col:
+            val = parse_number(row.get(valu_cvt_col))
+            if val is not None:
+                data[label]["misc_inst"] += val
+
+        if l1_ai_col:
+            val = parse_number(row.get(l1_ai_col))
+            if val is not None:
+                data[label]["l1_ai_sum"] += val
+                data[label]["l1_ai_count"] += 1
+        if l2_ai_col:
+            val = parse_number(row.get(l2_ai_col))
+            if val is not None:
+                data[label]["l2_ai_sum"] += val
+                data[label]["l2_ai_count"] += 1
+        if hbm_ai_col:
+            val = parse_number(row.get(hbm_ai_col))
+            if val is not None:
+                data[label]["hbm_ai_sum"] += val
+                data[label]["hbm_ai_count"] += 1
+
+        counts[label] += 1
+
+    if not data:
+        raise ValueError("No kernels matched the provided list.")
+
+    return data
+
+
+def kernel_point_types(count):
+    points = [5, 7, 9, 11, 13, 3, 4, 6, 8, 10, 12, 14]
+    return [points[i % len(points)] for i in range(count)]
+
+
+def escape_gnuplot_string(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate gnuplot data file from rocprof-compute/omniperf CSV output."
+    )
+    parser.add_argument("--workload", required=True, help="Path to workload SOC directory")
+    parser.add_argument("--kernels", required=True, help="Comma-separated list of kernel name substrings")
+    parser.add_argument("--precision", default="fp32", choices=["fp32", "fp64"])
+    parser.add_argument("--pmc", default=None, help="Override pmc_perf.csv path")
+    parser.add_argument("--roofline", default=None, help="Override roofline.csv path")
+
+    parser.add_argument("--kernel-col", default=None)
+    parser.add_argument("--fp32-perf-col", default=None)
+    parser.add_argument("--fp64-perf-col", default=None)
+    parser.add_argument("--fp32-flop-col", default=None)
+    parser.add_argument("--time-col", default=None)
+    parser.add_argument("--l1-ai-col", default=None)
+    parser.add_argument("--l2-ai-col", default=None)
+    parser.add_argument("--hbm-ai-col", default=None)
+    parser.add_argument("--l1-bytes-col", default=None)
+    parser.add_argument("--l2-bytes-col", default=None)
+    parser.add_argument("--hbm-bytes-col", default=None)
+    args = parser.parse_args()
+
+    kernels = parse_kernels(args.kernels)
+    if not kernels:
+        raise ValueError("--kernels is required")
+
+    workload = args.workload
+    pmc_path = args.pmc or os.path.join(workload, "pmc_perf.csv")
+    roofline_path = args.roofline or os.path.join(workload, "roofline.csv")
+
+    rows, headers = read_csv(pmc_path)
+    data = collect_kernel_metrics(rows, headers, kernels, args)
+
+    peaks = parse_roofline_peaks(roofline_path)
+
+    # Build kernel order by KERNELS input order
+    kernel_order = [k for k in kernels if k in data]
+
+    print(f"peak_fp = {peaks.get('peak_fp', 0)}")
+    print(f"peak_dp = {peaks.get('peak_dp', 0)}")
+    print(f"l1_peak = {peaks.get('l1_peak', 0)}")
+    print(f"l2_peak = {peaks.get('l2_peak', 0)}")
+    print(f"hbm_peak = {peaks.get('hbm_peak', 0)}")
+    print(f"kernel_count = {len(kernel_order)}")
+
+    point_types = kernel_point_types(len(kernel_order))
+    roofline_sp_points = []
+    roofline_dp_points = []
+    instmix_lines = []
+
+    for idx, kernel_name in enumerate(kernel_order):
+        d = data[kernel_name]
+        escaped_name = escape_gnuplot_string(kernel_name)
+        print(f"kernel_name_{idx} = \"{escaped_name}\"")
+        print(f"kernel_point_{idx} = {point_types[idx]}")
+
+        sp_perf = 0.0
+        if d.get("fp32_flop") and d.get("time_s"):
+            sp_perf = d["fp32_flop"] / (d["time_s"] * 1_000_000_000.0)
+        elif d.get("fp32_perf_count"):
+            sp_perf = d["fp32_perf_sum"] / d["fp32_perf_count"]
+
+        dp_perf = 0.0
+        if d.get("fp64_perf_count"):
+            dp_perf = d["fp64_perf_sum"] / d["fp64_perf_count"]
+
+        l1_ai = 0.0
+        l2_ai = 0.0
+        hbm_ai = 0.0
+        if d.get("fp32_flop") and d.get("l1_bytes"):
+            l1_ai = d["fp32_flop"] / d["l1_bytes"]
+        elif d.get("l1_ai_count"):
+            l1_ai = d["l1_ai_sum"] / d["l1_ai_count"]
+        if d.get("fp32_flop") and d.get("l2_bytes"):
+            l2_ai = d["fp32_flop"] / d["l2_bytes"]
+        elif d.get("l2_ai_count"):
+            l2_ai = d["l2_ai_sum"] / d["l2_ai_count"]
+        if d.get("fp32_flop") and d.get("hbm_bytes"):
+            hbm_ai = d["fp32_flop"] / d["hbm_bytes"]
+        elif d.get("hbm_ai_count"):
+            hbm_ai = d["hbm_ai_sum"] / d["hbm_ai_count"]
+
+        print(f"k{idx}_sp_perf = {sp_perf}")
+        print(f"k{idx}_dp_perf = {dp_perf}")
+        print(f"k{idx}_l1_sp_intensity = {l1_ai}")
+        print(f"k{idx}_l2_sp_intensity = {l2_ai}")
+        print(f"k{idx}_hbm_sp_intensity = {hbm_ai}")
+        print(f"k{idx}_l1_dp_intensity = 0.0")
+        print(f"k{idx}_l2_dp_intensity = 0.0")
+        print(f"k{idx}_hbm_dp_intensity = 0.0")
+
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_sp_intensity):(k{idx}_sp_perf) "
+            f"with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_sp_intensity):(k{idx}_sp_perf) "
+            f"with points lc rgb l2_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_sp_intensity):(k{idx}_sp_perf) "
+            f"with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_dp_intensity):(k{idx}_dp_perf) "
+            f"with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_dp_intensity):(k{idx}_dp_perf) "
+            f"with points lc rgb l2_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_dp_intensity):(k{idx}_dp_perf) "
+            f"with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
+        )
+
+        insts = d.get("insts", 0.0)
+        if insts > 0:
+            fp_inst = d.get("fp_inst", 0.0)
+            int_inst = d.get("int_inst", 0.0)
+            mem_inst = d.get("mem_inst", 0.0)
+            cf_inst = d.get("cf_inst", 0.0)
+            misc_inst = d.get("misc_inst", 0.0)
+            threadcomm_inst = 0.0
+            known = fp_inst + int_inst + mem_inst + cf_inst + misc_inst + threadcomm_inst
+            if known < insts:
+                misc_inst += insts - known
+            denom = insts if insts else 1.0
+            instmix_lines.append(
+                f"\"{escaped_name}\" "
+                f"{(misc_inst / denom) * 100:.1f} {(threadcomm_inst / denom) * 100:.1f} "
+                f"{(cf_inst / denom) * 100:.1f} {(mem_inst / denom) * 100:.1f} "
+                f"{(int_inst / denom) * 100:.1f} {(fp_inst / denom) * 100:.1f}"
+            )
+
+    print("\nroofline_sp_points = \"" + ", ".join(roofline_sp_points) + "\"")
+    print("\nroofline_dp_points = \"" + ", ".join(roofline_dp_points) + "\"")
+    if instmix_lines:
+        print("\n$instmix << EOD")
+        print("\n".join(instmix_lines))
+        print("EOD")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)

@@ -1,6 +1,7 @@
 EXE ?= ./a.out
 FLAGS ?=
 METRICSFILE     ?= METRICS
+ARCH            ?= 80
 NCU             ?= ncu
 GNUPLOT         ?= gnuplot
 PSTOPDF         ?= ps2pdf
@@ -15,6 +16,12 @@ NCU_WARMUP ?= 0
 RAW_FILE_PREFIX = $(OUT_DIR)/profile.raw
 RAW_FILE_STAMP = $(OUT_DIR)/profile.raw.stamp
 
+ifeq ($(V),1)
+Q :=
+else
+Q := @
+endif
+
 ifneq ($(strip $(KERNELS)),)
 KERNELS_REGEX := $(subst $(comma),|,$(KERNELS))
 NCU_KERNELS_ARG := --kernel-name "regex:$(KERNELS_REGEX)" --kernel-name-base $(NCU_KERNEL_NAME_BASE)
@@ -22,7 +29,26 @@ endif
 
 .PRECIOUS: $(OUT_DIR)/%.ps $(OUT_DIR)/%.pdf $(OUT_DIR)/%.dat
 
-METRICS = $(shell cut -f1 -d\# $(METRICSFILE) | xargs | tr ' ' ',')
+ifeq ($(ARCH),90)
+L1_PEAK_METRIC := l1tex__lsu_writeback_active_mem_lgds.sum.peak_sustained
+L1_PER_SECOND_METRIC := l1tex__lsu_writeback_active_mem_lgds.sum.per_second
+else ifneq (,$(filter 75 80 86 87 88 89,$(ARCH)))
+L1_PEAK_METRIC := l1tex__lsu_writeback_active_mem_lg.sum.peak_sustained
+L1_PER_SECOND_METRIC := l1tex__lsu_writeback_active_mem_lg.sum.per_second
+else
+L1_PEAK_METRIC := l1tex__lsu_writeback_active.sum.peak_sustained
+L1_PER_SECOND_METRIC := l1tex__lsu_writeback_active.sum.per_second
+endif
+
+METRICS_BASE = $(shell cut -f1 -d\# $(METRICSFILE) | \
+	grep -v -e l1tex__lsu_writeback_active_mem_lgds.sum.peak_sustained \
+	         -e l1tex__lsu_writeback_active_mem_lg.sum.peak_sustained \
+	         -e l1tex__lsu_writeback_active.sum.peak_sustained \
+	         -e l1tex__lsu_writeback_active_mem_lgds.sum.per_second \
+	         -e l1tex__lsu_writeback_active_mem_lg.sum.per_second \
+	         -e l1tex__lsu_writeback_active.sum.per_second | \
+	xargs | tr ' ' ',')
+METRICS = $(METRICS_BASE),$(L1_PEAK_METRIC),$(L1_PER_SECOND_METRIC)
 
 # Expected files:
 # pdf plots
@@ -56,33 +82,33 @@ $(OUT_DIR):
 	mkdir -p $@
 
 $(RAW_FILE_STAMP): | $(OUT_DIR)
-	@rm -f $(RAW_FILES)
-	@i=1; while [ $$i -le $(NCU_RUNS) ]; do \
+	$(Q)rm -f $(RAW_FILES)
+	$(Q)i=1; while [ $$i -le $(NCU_RUNS) ]; do \
 		$(NCU) --page raw --metrics=$(METRICS) $(NCU_KERNELS_ARG) $(EXE) $(FLAGS) > $(RAW_FILE_PREFIX).$$i; \
 		i=$$((i+1)); \
 	done
-	@touch $@
+	$(Q)touch $@
 
 $(DATA_FILE): $(RAW_FILE_STAMP)
-	./ncu2dat --template=gnuplot.template $(addprefix --raw=,$(RAW_FILES)) --warmup=$(NCU_WARMUP) --kernels="$(KERNELS)" $(NCU2DAT_ARGS) > $@.tmp && mv $@.tmp $@
+	$(Q)./ncu2dat --template=gnuplot.template $(addprefix --raw=,$(RAW_FILES)) --warmup=$(NCU_WARMUP) --kernels="$(KERNELS)" --arch=$(ARCH) $(NCU2DAT_ARGS) > $@.tmp && mv $@.tmp $@
 
 $(OUT_DIR)/roofline-sp.ps: roofline.gnuplot $(DATA_FILE)
-	$(GNUPLOT) -e "outfile='$@';precision='$(ROOFLINE_PRECISION)'" $(DATA_FILE) $<
+	$(Q)$(GNUPLOT) -e "outfile='$@';precision='$(ROOFLINE_PRECISION)'" $(DATA_FILE) $<
 
 $(OUT_DIR)/roofline-dp.ps: roofline.gnuplot $(DATA_FILE)
-	$(GNUPLOT) -e "outfile='$@';precision='dp'" $(DATA_FILE) $<
+	$(Q)$(GNUPLOT) -e "outfile='$@';precision='dp'" $(DATA_FILE) $<
 
 $(OUT_DIR)/roofline-inst.ps: roofline-inst.gnuplot $(DATA_FILE)
-	$(GNUPLOT) -e "outfile='$@'" $(DATA_FILE) $<
+	$(Q)$(GNUPLOT) -e "outfile='$@'" $(DATA_FILE) $<
 
 $(OUT_DIR)/instmix.ps: instmix.hist.gnuplot $(DATA_FILE)
-	$(GNUPLOT) -e "infile='$(DATA_FILE)';outfile='$@'" instmix.hist.gnuplot
+	$(Q)$(GNUPLOT) -e "infile='$(DATA_FILE)';outfile='$@'" instmix.hist.gnuplot
 
 $(OUT_DIR)/%.pdf: $(OUT_DIR)/%.ps
-	$(PSTOPDF) $< $@
+	$(Q)$(PSTOPDF) $< $@
 
 clean:
-	@rm -f \
+	$(Q)rm -f \
 		$(PLOTS) \
 		$(PS_FILES) \
 		$(DAT_FILES) \
