@@ -15,7 +15,7 @@ l2_thread_intensity_dp =  {dp_flop} / {l2_bytes}
 hbm_thread_intensity_dp = {dp_flop} / {dram_bytes}
 
 warp_shared_instruction_performance = {warp_shared_ld_st_instructions} / ({elapsed_s} * 1000000000)
-shared_warp_inst_intensity = {warp_shared_ld_st_instructions} / {warp_shared_transactions}
+shared_warp_inst_intensity = ({warp_shared_transactions} == 0 ? 0 : {warp_shared_ld_st_instructions} / {warp_shared_transactions})
 
 fp_instructions_pct = ({fp_instructions} / {tot_instructions}) * 100.
 int_instructions_pct = ({int_instructions} / {tot_instructions}) * 100.
