@@ -528,6 +528,12 @@ def data_to_roofline_vars(data):
         "sp_perf": sp_perf,
         "dp_perf": dp_perf,
         "inst_perf": inst_perf,
+        "warp_shared_instruction_performance": safe_div(
+            data["warp_shared_ld_st_instructions"], elapsed_s * 1000000000.0
+        ),
+        "shared_warp_inst_intensity": safe_div(
+            data["warp_shared_ld_st_instructions"], data["warp_shared_transactions"]
+        ),
         "l1_sp_intensity": safe_div(sp_flops_per_s, l1_bytes_per_s)
         if sp_flops_per_s is not None and l1_bytes_per_s is not None
         else safe_div(data["fp_flop"], data["l1_bytes"]),
@@ -979,8 +985,13 @@ if __name__ == "__main__":
     roofline_sp_points = []
     roofline_dp_points = []
     roofline_inst_points = []
+    roofline_shared_points = []
     data_block = []
     data_block.append("# kernel " + " ".join(CANONICAL_KEYS))
+    occupancy_block = []
+    occupancy_block.append("# kernel sustained_occupancy_pct peak_occupancy_margin_pct")
+    predication_block = []
+    predication_block.append("# kernel efficiency")
     for idx, kernel_name in enumerate(kernel_order):
         data = data_by_kernel[kernel_name]
         if args.debug_ai:
@@ -1043,12 +1054,24 @@ if __name__ == "__main__":
             f"[0:0:1] '+' us (k{idx}_hbm_inst_intensity):(k{idx}_inst_perf) "
             f"with points lc rgb hbm_color pt {point_key} ps point_size notitle"
         )
+        roofline_shared_points.append(
+            f"[0:0:1] '+' us (k{idx}_shared_warp_inst_intensity):(k{idx}_warp_shared_instruction_performance) "
+            f"with points lc rgb shared_color pt {point_key} ps point_size title {name_key}"
+        )
         row_values = [escaped_name] + [str(data.get(k, 0.0)) for k in CANONICAL_KEYS]
         quoted = [f"\"{row_values[0]}\""] + row_values[1:]
         data_block.append(" ".join(quoted))
+        occupancy_block.append(
+            f"\"{escaped_name}\" {data.get('sustained_occupancy_pct', 0.0)} "
+            f"{data.get('peak_occupancy_margin_pct', 0.0)}"
+        )
+        predication_block.append(f"\"{escaped_name}\" {data.get('efficiency', 0.0)}")
     output = output + "\nroofline_sp_points = \"" + ", ".join(roofline_sp_points) + "\"\n"
     output = output + "\nroofline_dp_points = \"" + ", ".join(roofline_dp_points) + "\"\n"
     output = output + "\nroofline_inst_points = \"" + ", ".join(roofline_inst_points) + "\"\n"
+    output = output + "\nroofline_shared_points = \"" + ", ".join(roofline_shared_points) + "\"\n"
+    output = output + "\n$occupancy << EOD\n" + "\n".join(occupancy_block) + "\nEOD\n"
+    output = output + "\n$predication << EOD\n" + "\n".join(predication_block) + "\nEOD\n"
     output = output + "\n$kernel_stats << EOD\n" + "\n".join(data_block) + "\nEOD\n"
     print(output)
     # else:

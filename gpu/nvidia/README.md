@@ -22,7 +22,10 @@ Outputs are written under `out/` by default:
 - `out/roofline-sp.pdf`
 - `out/roofline-dp.pdf`
 - `out/roofline-inst.pdf`
+- `out/roofline-shared.pdf`
 - `out/instmix.pdf`
+- `out/hist-occupancy.pdf`
+- `out/hist-predication.pdf`
 
 Note: the pipeline uses only raw output (`--page raw`) and requests the metrics
 listed in `METRICS`.
@@ -32,7 +35,10 @@ listed in `METRICS`.
 - `./profile.sh` builds all plots.
 - `./profile.sh fp` builds only the SP roofline.
 - `./profile.sh inst` builds only the instruction roofline.
+- `./profile.sh shared` builds the shared memory roofline plot.
 - `./profile.sh instmix` builds only the instruction mix histogram.
+- `./profile.sh occupancy` builds the occupancy histogram.
+- `./profile.sh predication` builds the thread efficiency/predication histogram.
 - `./profile.sh dp` builds the DP roofline plot.
 - `./profile.sh clean` removes generated files.
 
@@ -49,6 +55,7 @@ listed in `METRICS`.
 - `ROOFLINE_PRECISION`: peak selection for roofline (`fp` or `dp`, default: `fp`).
 - `NCU_RUNS`: number of NCU runs to capture (default: `1`).
 - `NCU_WARMUP`: number of initial runs to discard when averaging (default: `0`).
+- `shared_peak` (gnuplot override): shared memory peak in GTXN/s for `roofline-shared` (default falls back to `l1_peak_txn` if present).
 
 Example:
 

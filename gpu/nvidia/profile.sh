@@ -12,7 +12,10 @@ Targets:
   fp             Build SP roofline
   dp             Build DP roofline
   inst           Build instruction roofline
+  shared         Build shared memory roofline
   instmix         Build instruction mix histogram
+  occupancy       Build occupancy histogram
+  predication     Build thread efficiency/predication histogram
   clean           Remove generated files
 
 Variables (same names as old Makefile):
@@ -178,6 +181,13 @@ plot_inst() {
   "$PSTOPDF" "${OUT_DIR}/roofline-inst.ps" "${OUT_DIR}/roofline-inst.pdf"
 }
 
+plot_shared() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${OUT_DIR}/roofline-shared.ps'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/roofline-shared.gnuplot"
+  "$PSTOPDF" "${OUT_DIR}/roofline-shared.ps" "${OUT_DIR}/roofline-shared.pdf"
+}
+
 plot_instmix() {
   build_dat
   "$GNUPLOT" -e "infile='${DATA_FILE}';outfile='${OUT_DIR}/instmix.ps'" \
@@ -185,16 +195,36 @@ plot_instmix() {
   "$PSTOPDF" "${OUT_DIR}/instmix.ps" "${OUT_DIR}/instmix.pdf"
 }
 
+plot_occupancy() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${OUT_DIR}/hist-occupancy.ps'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/hist-occupancy.gnuplot"
+  "$PSTOPDF" "${OUT_DIR}/hist-occupancy.ps" "${OUT_DIR}/hist-occupancy.pdf"
+}
+
+plot_predication() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${OUT_DIR}/hist-predication.ps'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/hist-predication.gnuplot"
+  "$PSTOPDF" "${OUT_DIR}/hist-predication.ps" "${OUT_DIR}/hist-predication.pdf"
+}
+
 clean() {
   rm -f \
     "${OUT_DIR}/roofline-sp.pdf" \
     "${OUT_DIR}/roofline-dp.pdf" \
     "${OUT_DIR}/roofline-inst.pdf" \
+    "${OUT_DIR}/roofline-shared.pdf" \
     "${OUT_DIR}/instmix.pdf" \
+    "${OUT_DIR}/hist-occupancy.pdf" \
+    "${OUT_DIR}/hist-predication.pdf" \
     "${OUT_DIR}/roofline-sp.ps" \
     "${OUT_DIR}/roofline-dp.ps" \
     "${OUT_DIR}/roofline-inst.ps" \
+    "${OUT_DIR}/roofline-shared.ps" \
     "${OUT_DIR}/instmix.ps" \
+    "${OUT_DIR}/hist-occupancy.ps" \
+    "${OUT_DIR}/hist-predication.ps" \
     "${DATA_FILE}" \
     "${RAW_FILE_PREFIX}."* \
     "${RAW_FILE_STAMP}"
@@ -206,7 +236,10 @@ for t in "${targets[@]}"; do
       plot_fp
       plot_dp
       plot_inst
+      plot_shared
       plot_instmix
+      plot_occupancy
+      plot_predication
       ;;
     dat)
       build_dat
@@ -220,8 +253,17 @@ for t in "${targets[@]}"; do
     inst)
       plot_inst
       ;;
+    shared)
+      plot_shared
+      ;;
     instmix)
       plot_instmix
+      ;;
+    occupancy)
+      plot_occupancy
+      ;;
+    predication)
+      plot_predication
       ;;
     clean)
       clean
