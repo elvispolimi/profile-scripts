@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./profile.sh [VAR=VALUE ...] [targets...]
+
+Targets:
+  all (default)  Build roofline plot
+  profile         Run the profiler
+  dat             Generate profile.dat only
+  plot            Build roofline plot
+  instmix         Build instruction mix plot
+  clean           Remove generated files
+
+Variables (same names as old Makefile):
+  EXE (required for profile)         Executable to profile
+  FLAGS                             Extra args passed to EXE
+  KERNELS                           Comma-separated kernel substrings
+  OUT_DIR (default: out)            Output directory
+  WORKLOAD (default: profile)       Profiler workload name
+  SOC                               Explicit SOC directory under workloads/WORKLOAD
+  PROFILER (default: rocprof-compute)
+  PROFILER_ARGS                     Extra profiler args (e.g., device selection)
+  ROOF_ONLY (default: 1)            0 for full profiling
+  ROOFLINE_DATA_TYPE (default: FP32)
+  PROFILER_CMD                      Full command override
+  AMD2DAT (default: ./omniperf2dat)
+  GNUPLOT (default: gnuplot)
+  ROOFLINE_PRECISION (default: fp32)
+
+Examples:
+  ./profile.sh profile EXE=/path/to/your/exe KERNELS=kernelA,kernelB
+  ./profile.sh OUT_DIR=/tmp/out plot
+EOF
+}
+
+targets=()
+for arg in "$@"; do
+  case "$arg" in
+    *=*)
+      export "$arg"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      targets+=("$arg")
+      ;;
+  esac
+done
+
+if [ ${#targets[@]} -eq 0 ]; then
+  targets=(all)
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+EXE="${EXE:-}"
+FLAGS="${FLAGS:-}"
+KERNELS="${KERNELS:-}"
+OUT_DIR="${OUT_DIR:-out}"
+WORKLOAD="${WORKLOAD:-profile}"
+SOC="${SOC:-}"
+PROFILER="${PROFILER:-rocprof-compute}"
+PROFILER_ARGS="${PROFILER_ARGS:-}"
+ROOF_ONLY="${ROOF_ONLY:-1}"
+ROOFLINE_DATA_TYPE="${ROOFLINE_DATA_TYPE:-FP32}"
+PROFILER_CMD="${PROFILER_CMD:-}"
+AMD2DAT="${AMD2DAT:-${SCRIPT_DIR}/omniperf2dat}"
+GNUPLOT="${GNUPLOT:-gnuplot}"
+ROOFLINE_PRECISION="${ROOFLINE_PRECISION:-fp32}"
+
+comma=","
+KERNELS_ARG=()
+if [ -n "$KERNELS" ]; then
+  IFS=',' read -r -a _kernels <<<"$KERNELS"
+  for k in "${_kernels[@]}"; do
+    if [ -n "$k" ]; then
+      KERNELS_ARG+=(-k "$k")
+    fi
+  done
+fi
+
+ROOF_ONLY_ARG=()
+if [ "${ROOF_ONLY}" != "0" ]; then
+  ROOF_ONLY_ARG+=(--roof-only)
+fi
+
+WORKLOAD_DIR="${SCRIPT_DIR}/workloads/${WORKLOAD}"
+if [ -n "$SOC" ]; then
+  WORKLOAD_PATH="${WORKLOAD_DIR}/${SOC}"
+else
+  WORKLOAD_PATH="$(ls -d "${WORKLOAD_DIR}"/* 2>/dev/null | head -n 1 || true)"
+fi
+
+DATA_FILE="${OUT_DIR}/profile.dat"
+ROOFLINE_PLOT="${OUT_DIR}/roofline-${ROOFLINE_PRECISION}.pdf"
+INSTMIX_PLOT="${OUT_DIR}/instmix.pdf"
+
+ensure_out_dir() {
+  mkdir -p "$OUT_DIR"
+}
+
+run_profiler() {
+  if [ -z "$EXE" ]; then
+    echo "ERROR: EXE is required for profile target." >&2
+    exit 1
+  fi
+  pushd "$SCRIPT_DIR" >/dev/null
+  if [ -n "$PROFILER_CMD" ]; then
+    bash -c "$PROFILER_CMD"
+  else
+    "$PROFILER" profile --name "$WORKLOAD" \
+      "${ROOF_ONLY_ARG[@]}" \
+      --roofline-data-type "$ROOFLINE_DATA_TYPE" \
+      "${KERNELS_ARG[@]}" \
+      ${PROFILER_ARGS} -- "$EXE" $FLAGS
+  fi
+  popd >/dev/null
+}
+
+build_dat() {
+  if [ -z "$KERNELS" ]; then
+    echo "ERROR: KERNELS is required for dat/plot/instmix." >&2
+    exit 1
+  fi
+  if [ -z "$WORKLOAD_PATH" ] || [ ! -d "$WORKLOAD_PATH" ]; then
+    echo "ERROR: workload path not found: ${WORKLOAD_PATH:-<empty>}" >&2
+    echo "Run profile first or set WORKLOAD/SOC." >&2
+    exit 1
+  fi
+  ensure_out_dir
+  "$AMD2DAT" --workload "$WORKLOAD_PATH" --kernels "$KERNELS" --precision "$ROOFLINE_PRECISION" \
+    > "${DATA_FILE}.tmp" && mv "${DATA_FILE}.tmp" "$DATA_FILE"
+}
+
+plot_roofline() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${ROOFLINE_PLOT}';precision='${ROOFLINE_PRECISION}'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/roofline.gnuplot"
+}
+
+plot_instmix() {
+  build_dat
+  "$GNUPLOT" -e "infile='${DATA_FILE}';outfile='${INSTMIX_PLOT}'" \
+    "${SCRIPT_DIR}/instmix.hist.gnuplot"
+}
+
+clean() {
+  rm -f "$DATA_FILE" "$ROOFLINE_PLOT" "$INSTMIX_PLOT"
+}
+
+for t in "${targets[@]}"; do
+  case "$t" in
+    all)
+      plot_roofline
+      ;;
+    profile)
+      run_profiler
+      ;;
+    dat)
+      build_dat
+      ;;
+    plot)
+      plot_roofline
+      ;;
+    instmix)
+      plot_instmix
+      ;;
+    clean)
+      clean
+      ;;
+    *)
+      echo "Unknown target: $t" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done

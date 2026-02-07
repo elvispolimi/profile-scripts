@@ -10,9 +10,9 @@ Both tools produce a workload directory containing `pmc_perf.csv` and `roofline.
 
 ## Quick start
 ```bash
-make -C gpu/amd profile EXE=/path/to/your/exe KERNELS=kernelA,kernelB
-make -C gpu/amd dat KERNELS=kernelA,kernelB
-make -C gpu/amd plot KERNELS=kernelA,kernelB
+./profile.sh profile EXE=/path/to/your/exe KERNELS=kernelA,kernelB
+./profile.sh dat KERNELS=kernelA,kernelB
+./profile.sh plot KERNELS=kernelA,kernelB
 ```
 
 Outputs:
@@ -37,7 +37,7 @@ Outputs:
 
 ## Example with Omniperf
 ```bash
-make -C gpu/amd profile \
+./profile.sh profile \
   PROFILER=omniperf \
   PROFILER_CMD="omniperf profile -n profile -- /path/to/your/exe --args" \
   KERNELS=kernelA,kernelB
@@ -46,7 +46,7 @@ make -C gpu/amd profile \
 ## Instruction mix
 To generate instmix plots, run with full profiling and then:
 ```bash
-make -C gpu/amd profile ROOF_ONLY=0 KERNELS=kernelA,kernelB
-make -C gpu/amd dat KERNELS=kernelA,kernelB
-make -C gpu/amd instmix
+./profile.sh profile ROOF_ONLY=0 KERNELS=kernelA,kernelB
+./profile.sh dat KERNELS=kernelA,kernelB
+./profile.sh instmix
 ```
