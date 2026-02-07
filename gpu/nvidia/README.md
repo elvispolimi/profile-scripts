@@ -5,7 +5,7 @@ Location in repo hierarchy:
 - `gpu/` groups GPU-related tooling by vendor.
 - `gpu/nvidia/` holds NVIDIA-specific scripts. Architecture-specific subfolders may be added later.
 
-Make-based pipeline to profile a single executable with Nsight Compute (ncu),
+Script-based pipeline to profile a single executable with Nsight Compute (ncu),
 convert metrics into gnuplot variables, and generate roofline and instruction
 mix plots. Plot data is derived from a single raw NCU report.
 
@@ -14,7 +14,7 @@ mix plots. Plot data is derived from a single raw NCU report.
 Run the executable and build all plots (kernel list required):
 
 ```sh
-make EXE=/absolute/path/to/your/exe KERNELS=kernelA,kernelB
+./profile.sh EXE=/absolute/path/to/your/exe KERNELS=kernelA,kernelB
 ```
 
 Outputs are written under `out/` by default:
@@ -29,12 +29,12 @@ listed in `METRICS`.
 
 ## Targets
 
-- `make` builds all plots.
-- `make fp` builds only the SP roofline.
-- `make inst` builds only the instruction roofline.
-- `make instmix` builds only the instruction mix histogram.
-- `make dp` builds the DP roofline plot.
-- `make clean` removes generated files.
+- `./profile.sh` builds all plots.
+- `./profile.sh fp` builds only the SP roofline.
+- `./profile.sh inst` builds only the instruction roofline.
+- `./profile.sh instmix` builds only the instruction mix histogram.
+- `./profile.sh dp` builds the DP roofline plot.
+- `./profile.sh clean` removes generated files.
 
 ## Key variables
 
@@ -53,7 +53,7 @@ listed in `METRICS`.
 Example:
 
 ```sh
-make EXE=/home/user/bin/my_app FLAGS="--size 1024" OUT_DIR=build KERNELS=kernelA,kernelB
+./profile.sh EXE=/home/user/bin/my_app FLAGS="--size 1024" OUT_DIR=build KERNELS=kernelA,kernelB
 ```
 
 ## How data flows
@@ -63,4 +63,4 @@ make EXE=/home/user/bin/my_app FLAGS="--size 1024" OUT_DIR=build KERNELS=kernelA
 3. Gnuplot renders `.ps`, then `ps2pdf` produces the final PDFs.
 
 If you need to re-capture profiling data, remove `out/profile.raw` or run
-`make clean`.
+`./profile.sh clean`.
