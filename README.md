@@ -1,9 +1,18 @@
 # GPU Profiling Scripts
 
-This repository is organized under `gpu/` by vendor and architecture.
+Small, opinionated tooling to collect Nsight Compute (and vendor equivalents) metrics
+and generate roofline/summary plots for specific kernels. It is meant for repeatable
+profiling runs rather than one-off GUI sessions.
+
+Vendors supported today:
+- NVIDIA (Nsight Compute)
+- AMD (ROCProfiler/rocprof-style workflows)
+
+The repository is organized under `gpu/<vendor>/`.
 
 - `gpu/README.md` explains the hierarchy.
 - `gpu/nvidia/README.md` covers NVIDIA usage and tooling.
+- `gpu/amd/README.md` covers AMD usage and tooling.
 
 ## Acknowledgements
 

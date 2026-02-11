@@ -1,8 +1,11 @@
 # GPU Profiling Scripts
 
-This repository is organized by vendor and (eventually) architecture:
+Scope: vendor-specific scripts that run command-line profilers, collect metrics, and
+produce roofline or histogram artifacts for selected kernels.
+
+This repository is organized by vendor:
 
 - `gpu/nvidia/` contains NVIDIA-specific profiling scripts and tooling.
-- `gpu/<vendor>/<architecture>/` will be added as new vendors and architectures are supported.
+- `gpu/amd/` contains AMD-specific profiling scripts and tooling.
 
 See each vendor README for usage details.
