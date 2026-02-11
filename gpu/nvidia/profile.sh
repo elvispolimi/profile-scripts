@@ -136,7 +136,7 @@ run_ncu() {
   metrics="$(build_metrics_list)"
   local i=1
   while [ "$i" -le "$NCU_RUNS" ]; do
-    "$NCU" --page raw --metrics="${metrics}" "${NCU_KERNELS_ARG[@]}" \
+    "$NCU" --page raw --print-units base --metrics="${metrics}" "${NCU_KERNELS_ARG[@]}" \
       "$EXE" $FLAGS > "${RAW_FILE_PREFIX}.${i}"
     i=$((i+1))
   done
