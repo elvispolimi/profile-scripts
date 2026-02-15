@@ -7,6 +7,7 @@ import re
 import sys
 from collections import defaultdict
 
+
 def parse_kernels(arg):
     return [k.strip() for k in arg.split(",") if k.strip()]
 
@@ -47,7 +48,7 @@ def parse_number(value):
         return None
     num = float(m.group(0))
     unit = s[m.end() :].strip().lower()
-    if unit.startswith("gb"):  # GB, GByte
+    if unit.startswith("gb"):
         return num * 1_000_000_000.0
     if unit.startswith("mb"):
         return num * 1_000_000.0
@@ -94,11 +95,10 @@ def parse_roofline_peaks(path):
                 if best is None or val > best:
                     best = val
             if best is not None:
-                peaks[key] = best if key.startswith("peak_") else best
+                peaks[key] = best
         if peaks:
             return peaks
 
-    # Fallback: key/value style parsing
     with open(path, "r") as f:
         for line in f:
             lower = line.lower()
@@ -114,6 +114,12 @@ def parse_roofline_peaks(path):
                     if val is not None:
                         peaks[key] = val
     return peaks
+
+
+def safe_div(numerator, denominator):
+    if denominator in (None, 0):
+        return 0.0
+    return numerator / denominator
 
 
 def collect_kernel_metrics(rows, headers, kernels, args):
@@ -140,6 +146,11 @@ def collect_kernel_metrics(rows, headers, kernels, args):
         headers,
         ["FP32 FLOPs", "F32 FLOPs", "FLOPs FP32", "FLOPs (FP32)", "FLOPs"],
         args.fp32_flop_col,
+    )
+    fp64_flop_col = find_col(
+        headers,
+        ["FP64 FLOPs", "F64 FLOPs", "FLOPs FP64", "FLOPs (FP64)"],
+        args.fp64_flop_col,
     )
     time_col = find_col(
         headers,
@@ -178,6 +189,39 @@ def collect_kernel_metrics(rows, headers, kernels, args):
         ["HBM Bytes", "HBM_BYTES", "DRAM Bytes", "DRAM_BYTES", "HBM Bytes (B)", "DRAM Bytes (B)"],
         args.hbm_bytes_col,
     )
+    lds_bytes_col = find_col(
+        headers,
+        ["LDS Bytes", "LDS_BYTES", "LDS Bytes (B)", "LDS Traffic (B)", "LDS Traffic"],
+        args.lds_bytes_col,
+    )
+
+    occupancy_col = find_col(
+        headers,
+        [
+            "Occupancy (%)",
+            "Achieved Occupancy (%)",
+            "Wavefront Occupancy (%)",
+            "Wave Occupancy (%)",
+            "Occupancy",
+        ],
+        args.occupancy_col,
+    )
+    occupancy_peak_col = find_col(
+        headers,
+        ["Peak Occupancy (%)", "Max Occupancy (%)", "Theoretical Occupancy (%)"],
+        args.occupancy_peak_col,
+    )
+    efficiency_col = find_col(
+        headers,
+        [
+            "Thread Efficiency (%)",
+            "Wavefront Efficiency (%)",
+            "SIMD Utilization (%)",
+            "VALU Utilization (%)",
+            "ALU Utilization (%)",
+        ],
+        args.efficiency_col,
+    )
 
     insts_col = find_col(headers, ["SQ_INSTS", "Insts", "Instructions"], None)
     branch_col = find_col(headers, ["SQ_INSTS_BRANCH", "Insts Branch"], None)
@@ -185,7 +229,6 @@ def collect_kernel_metrics(rows, headers, kernels, args):
     lds_col = find_col(headers, ["SQ_INSTS_LDS"], None)
     vmem_rd_col = find_col(headers, ["SQ_INSTS_VMEM_RD"], None)
     vmem_wr_col = find_col(headers, ["SQ_INSTS_VMEM_WR"], None)
-    valu_col = find_col(headers, ["SQ_INSTS_VALU"], None)
     valu_i32_col = find_col(headers, ["SQ_INSTS_VALU_INT32"], None)
     valu_i64_col = find_col(headers, ["SQ_INSTS_VALU_INT64"], None)
     valu_cvt_col = find_col(headers, ["SQ_INSTS_VALU_CVT"], None)
@@ -206,7 +249,6 @@ def collect_kernel_metrics(rows, headers, kernels, args):
     mfma_i8_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_I8"], None)
 
     data = defaultdict(lambda: defaultdict(float))
-    counts = defaultdict(int)
 
     for row in rows:
         kernel_name = row.get(kernel_col, "")
@@ -214,16 +256,16 @@ def collect_kernel_metrics(rows, headers, kernels, args):
         if label is None:
             continue
 
-        # Prefer totals if available
-        flop = parse_number(row.get(fp32_flop_col)) if fp32_flop_col else None
+        fp32_flop = parse_number(row.get(fp32_flop_col)) if fp32_flop_col else None
+        fp64_flop = parse_number(row.get(fp64_flop_col)) if fp64_flop_col else None
         time_val = parse_number(row.get(time_col)) if time_col else None
         if time_val is not None and time_col and "us" in time_col.lower():
             time_val *= 1e-6
         if time_val is not None and time_col and "ns" in time_col.lower():
             time_val *= 1e-9
 
-        if flop is not None and time_val:
-            data[label]["fp32_flop"] += flop
+        if fp32_flop is not None and time_val:
+            data[label]["fp32_flop"] += fp32_flop
             data[label]["time_s"] += time_val
         elif fp32_perf_col:
             perf = parse_number(row.get(fp32_perf_col))
@@ -231,7 +273,10 @@ def collect_kernel_metrics(rows, headers, kernels, args):
                 data[label]["fp32_perf_sum"] += perf
                 data[label]["fp32_perf_count"] += 1
 
-        if fp64_perf_col:
+        if fp64_flop is not None and time_val:
+            data[label]["fp64_flop"] += fp64_flop
+            data[label]["time_s"] += time_val
+        elif fp64_perf_col:
             perf = parse_number(row.get(fp64_perf_col))
             if perf is not None:
                 data[label]["fp64_perf_sum"] += perf
@@ -249,8 +294,11 @@ def collect_kernel_metrics(rows, headers, kernels, args):
             val = parse_number(row.get(hbm_bytes_col))
             if val is not None:
                 data[label]["hbm_bytes"] += val
+        if lds_bytes_col:
+            val = parse_number(row.get(lds_bytes_col))
+            if val is not None:
+                data[label]["lds_bytes"] += val
 
-        # Instruction mix (AMD SQ_INSTS_* counters)
         insts = parse_number(row.get(insts_col)) if insts_col else None
         if insts is not None:
             data[label]["insts"] += insts
@@ -266,6 +314,14 @@ def collect_kernel_metrics(rows, headers, kernels, args):
         cf_inst = parse_number(row.get(branch_col)) if branch_col else None
         if cf_inst is not None:
             data[label]["cf_inst"] += cf_inst
+
+        shared_inst = 0.0
+        for col in (smem_col, lds_col):
+            val = parse_number(row.get(col)) if col else None
+            if val is not None:
+                shared_inst += val
+        if shared_inst:
+            data[label]["shared_inst"] += shared_inst
 
         int_inst = 0.0
         for col in (valu_i32_col, valu_i64_col):
@@ -320,7 +376,21 @@ def collect_kernel_metrics(rows, headers, kernels, args):
                 data[label]["hbm_ai_sum"] += val
                 data[label]["hbm_ai_count"] += 1
 
-        counts[label] += 1
+        if occupancy_col:
+            val = parse_number(row.get(occupancy_col))
+            if val is not None:
+                data[label]["sustained_occupancy_sum"] += val
+                data[label]["sustained_occupancy_count"] += 1
+        if occupancy_peak_col:
+            val = parse_number(row.get(occupancy_peak_col))
+            if val is not None:
+                data[label]["peak_occupancy_sum"] += val
+                data[label]["peak_occupancy_count"] += 1
+        if efficiency_col:
+            val = parse_number(row.get(efficiency_col))
+            if val is not None:
+                data[label]["efficiency_sum"] += val
+                data[label]["efficiency_count"] += 1
 
     if not data:
         raise ValueError("No kernels matched the provided list.")
@@ -351,6 +421,7 @@ def main():
     parser.add_argument("--fp32-perf-col", default=None)
     parser.add_argument("--fp64-perf-col", default=None)
     parser.add_argument("--fp32-flop-col", default=None)
+    parser.add_argument("--fp64-flop-col", default=None)
     parser.add_argument("--time-col", default=None)
     parser.add_argument("--l1-ai-col", default=None)
     parser.add_argument("--l2-ai-col", default=None)
@@ -358,6 +429,10 @@ def main():
     parser.add_argument("--l1-bytes-col", default=None)
     parser.add_argument("--l2-bytes-col", default=None)
     parser.add_argument("--hbm-bytes-col", default=None)
+    parser.add_argument("--lds-bytes-col", default=None)
+    parser.add_argument("--occupancy-col", default=None)
+    parser.add_argument("--occupancy-peak-col", default=None)
+    parser.add_argument("--efficiency-col", default=None)
     args = parser.parse_args()
 
     kernels = parse_kernels(args.kernels)
@@ -373,7 +448,6 @@ def main():
 
     peaks = parse_roofline_peaks(roofline_path)
 
-    # Build kernel order by KERNELS input order
     kernel_order = [k for k in kernels if k in data]
 
     print(f"peak_fp = {peaks.get('peak_fp', 0)}")
@@ -381,12 +455,20 @@ def main():
     print(f"l1_peak = {peaks.get('l1_peak', 0)}")
     print(f"l2_peak = {peaks.get('l2_peak', 0)}")
     print(f"hbm_peak = {peaks.get('hbm_peak', 0)}")
+    print(f"l1_peak_txn = {safe_div(peaks.get('l1_peak', 0), 32.0)}")
+    print(f"l2_peak_txn = {safe_div(peaks.get('l2_peak', 0), 32.0)}")
+    print(f"hbm_peak_txn = {safe_div(peaks.get('hbm_peak', 0), 32.0)}")
+    print("inst_peak = 0")
     print(f"kernel_count = {len(kernel_order)}")
 
     point_types = kernel_point_types(len(kernel_order))
     roofline_sp_points = []
     roofline_dp_points = []
+    roofline_inst_points = []
+    roofline_shared_points = []
     instmix_lines = []
+    occupancy_block = ["# kernel sustained_occupancy_pct peak_occupancy_margin_pct"]
+    predication_block = ["# kernel efficiency"]
 
     for idx, kernel_name in enumerate(kernel_order):
         d = data[kernel_name]
@@ -401,33 +483,75 @@ def main():
             sp_perf = d["fp32_perf_sum"] / d["fp32_perf_count"]
 
         dp_perf = 0.0
-        if d.get("fp64_perf_count"):
+        if d.get("fp64_flop") and d.get("time_s"):
+            dp_perf = d["fp64_flop"] / (d["time_s"] * 1_000_000_000.0)
+        elif d.get("fp64_perf_count"):
             dp_perf = d["fp64_perf_sum"] / d["fp64_perf_count"]
 
         l1_ai = 0.0
         l2_ai = 0.0
         hbm_ai = 0.0
         if d.get("fp32_flop") and d.get("l1_bytes"):
-            l1_ai = d["fp32_flop"] / d["l1_bytes"]
+            l1_ai = safe_div(d["fp32_flop"], d["l1_bytes"])
         elif d.get("l1_ai_count"):
-            l1_ai = d["l1_ai_sum"] / d["l1_ai_count"]
+            l1_ai = safe_div(d["l1_ai_sum"], d["l1_ai_count"])
         if d.get("fp32_flop") and d.get("l2_bytes"):
-            l2_ai = d["fp32_flop"] / d["l2_bytes"]
+            l2_ai = safe_div(d["fp32_flop"], d["l2_bytes"])
         elif d.get("l2_ai_count"):
-            l2_ai = d["l2_ai_sum"] / d["l2_ai_count"]
+            l2_ai = safe_div(d["l2_ai_sum"], d["l2_ai_count"])
         if d.get("fp32_flop") and d.get("hbm_bytes"):
-            hbm_ai = d["fp32_flop"] / d["hbm_bytes"]
+            hbm_ai = safe_div(d["fp32_flop"], d["hbm_bytes"])
         elif d.get("hbm_ai_count"):
-            hbm_ai = d["hbm_ai_sum"] / d["hbm_ai_count"]
+            hbm_ai = safe_div(d["hbm_ai_sum"], d["hbm_ai_count"])
+
+        if d.get("fp64_flop"):
+            l1_dp_ai = safe_div(d["fp64_flop"], d.get("l1_bytes", 0.0))
+            l2_dp_ai = safe_div(d["fp64_flop"], d.get("l2_bytes", 0.0))
+            hbm_dp_ai = safe_div(d["fp64_flop"], d.get("hbm_bytes", 0.0))
+        else:
+            l1_dp_ai = l1_ai
+            l2_dp_ai = l2_ai
+            hbm_dp_ai = hbm_ai
+
+        insts = d.get("insts", 0.0)
+        time_s = d.get("time_s", 0.0)
+        inst_perf = safe_div(insts, time_s * 1_000_000_000.0)
+
+        l1_txn = safe_div(d.get("l1_bytes", 0.0), 32.0)
+        l2_txn = safe_div(d.get("l2_bytes", 0.0), 32.0)
+        hbm_txn = safe_div(d.get("hbm_bytes", 0.0), 32.0)
+        l1_total_32b_txn = l1_txn
+        l1_inst_intensity = safe_div(insts, l1_total_32b_txn)
+        l2_inst_intensity = safe_div(insts, l2_txn)
+        hbm_inst_intensity = safe_div(insts, hbm_txn)
+
+        shared_inst = d.get("shared_inst", 0.0)
+        shared_txn = safe_div(d.get("lds_bytes", 0.0), 32.0)
+        shared_perf = safe_div(shared_inst, time_s * 1_000_000_000.0)
+        shared_intensity = safe_div(shared_inst, shared_txn)
+
+        sustained_occ = safe_div(d.get("sustained_occupancy_sum", 0.0), d.get("sustained_occupancy_count", 0.0))
+        peak_occ = safe_div(d.get("peak_occupancy_sum", 0.0), d.get("peak_occupancy_count", 0.0))
+        if peak_occ <= 0.0:
+            peak_occ = 100.0
+        peak_occ_margin = max(0.0, peak_occ - sustained_occ)
+
+        efficiency = safe_div(d.get("efficiency_sum", 0.0), d.get("efficiency_count", 0.0))
 
         print(f"k{idx}_sp_perf = {sp_perf}")
         print(f"k{idx}_dp_perf = {dp_perf}")
+        print(f"k{idx}_inst_perf = {inst_perf}")
+        print(f"k{idx}_warp_shared_instruction_performance = {shared_perf}")
+        print(f"k{idx}_shared_warp_inst_intensity = {shared_intensity}")
         print(f"k{idx}_l1_sp_intensity = {l1_ai}")
         print(f"k{idx}_l2_sp_intensity = {l2_ai}")
         print(f"k{idx}_hbm_sp_intensity = {hbm_ai}")
-        print(f"k{idx}_l1_dp_intensity = 0.0")
-        print(f"k{idx}_l2_dp_intensity = 0.0")
-        print(f"k{idx}_hbm_dp_intensity = 0.0")
+        print(f"k{idx}_l1_dp_intensity = {l1_dp_ai}")
+        print(f"k{idx}_l2_dp_intensity = {l2_dp_ai}")
+        print(f"k{idx}_hbm_dp_intensity = {hbm_dp_ai}")
+        print(f"k{idx}_l1_inst_intensity = {l1_inst_intensity}")
+        print(f"k{idx}_l2_inst_intensity = {l2_inst_intensity}")
+        print(f"k{idx}_hbm_inst_intensity = {hbm_inst_intensity}")
 
         roofline_sp_points.append(
             f"[0:0:1] '+' us (k{idx}_l1_sp_intensity):(k{idx}_sp_perf) "
@@ -453,8 +577,23 @@ def main():
             f"[0:0:1] '+' us (k{idx}_hbm_dp_intensity):(k{idx}_dp_perf) "
             f"with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
         )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_inst_intensity):(k{idx}_inst_perf) "
+            f"with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_inst_intensity):(k{idx}_inst_perf) "
+            f"with points lc rgb l2_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_inst_intensity):(k{idx}_inst_perf) "
+            f"with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_shared_points.append(
+            f"[0:0:1] '+' us (k{idx}_shared_warp_inst_intensity):(k{idx}_warp_shared_instruction_performance) "
+            f"with points lc rgb shared_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
 
-        insts = d.get("insts", 0.0)
         if insts > 0:
             fp_inst = d.get("fp_inst", 0.0)
             int_inst = d.get("int_inst", 0.0)
@@ -465,7 +604,7 @@ def main():
             known = fp_inst + int_inst + mem_inst + cf_inst + misc_inst + threadcomm_inst
             if known < insts:
                 misc_inst += insts - known
-            denom = insts if insts else 1.0
+            denom = insts
             instmix_lines.append(
                 f"\"{escaped_name}\" "
                 f"{(misc_inst / denom) * 100:.1f} {(threadcomm_inst / denom) * 100:.1f} "
@@ -473,8 +612,20 @@ def main():
                 f"{(int_inst / denom) * 100:.1f} {(fp_inst / denom) * 100:.1f}"
             )
 
+        occupancy_block.append(f"\"{escaped_name}\" {sustained_occ} {peak_occ_margin}")
+        predication_block.append(f"\"{escaped_name}\" {efficiency}")
+
     print("\nroofline_sp_points = \"" + ", ".join(roofline_sp_points) + "\"")
     print("\nroofline_dp_points = \"" + ", ".join(roofline_dp_points) + "\"")
+    print("\nroofline_inst_points = \"" + ", ".join(roofline_inst_points) + "\"")
+    print("\nroofline_shared_points = \"" + ", ".join(roofline_shared_points) + "\"")
+    print("\n$occupancy << EOD")
+    print("\n".join(occupancy_block))
+    print("EOD")
+    print("\n$predication << EOD")
+    print("\n".join(predication_block))
+    print("EOD")
+
     if instmix_lines:
         print("\n$instmix << EOD")
         print("\n".join(instmix_lines))
