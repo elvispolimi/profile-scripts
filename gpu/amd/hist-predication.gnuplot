@@ -1,0 +1,14 @@
+if (!exists("outfile")) outfile='hist-predication.ps'
+set term postscript solid color rounded
+set output outfile
+
+set nokey
+set grid y
+set style data histograms
+set style fill solid 1.0 border -1
+set ytics 10 nomirror
+set yrange [0:100]
+set ylabel "Resource utilization/thread convergence %"
+set auto x
+
+plot $predication using 2:xtic(1) lc rgb '#0c51c2'

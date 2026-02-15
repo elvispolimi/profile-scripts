@@ -7,11 +7,17 @@ Usage:
   ./profile.sh [VAR=VALUE ...] [targets...]
 
 Targets:
-  all (default)  Build roofline plot
+  all (default)  Build all plots
   profile         Run the profiler
   dat             Generate profile.dat only
-  plot            Build roofline plot
+  plot            Build roofline plot (SP/FP32 by default)
+  fp              Build SP/FP32 roofline
+  dp              Build DP/FP64 roofline
+  inst            Build instruction roofline
+  shared          Build shared/LDS roofline
   instmix         Build instruction mix plot
+  occupancy       Build occupancy histogram
+  predication     Build thread efficiency histogram
   clean           Remove generated files
 
 Variables (same names as old Makefile):
@@ -28,6 +34,7 @@ Variables (same names as old Makefile):
   PROFILER_CMD                      Full command override
   AMD2DAT (default: ./omniperf2dat)
   GNUPLOT (default: gnuplot)
+  PSTOPDF (default: ps2pdf)
   ROOFLINE_PRECISION (default: fp32)
 
 Examples:
@@ -71,6 +78,7 @@ ROOFLINE_DATA_TYPE="${ROOFLINE_DATA_TYPE:-FP32}"
 PROFILER_CMD="${PROFILER_CMD:-}"
 AMD2DAT="${AMD2DAT:-${SCRIPT_DIR}/omniperf2dat}"
 GNUPLOT="${GNUPLOT:-gnuplot}"
+PSTOPDF="${PSTOPDF:-ps2pdf}"
 ROOFLINE_PRECISION="${ROOFLINE_PRECISION:-fp32}"
 
 comma=","
@@ -97,8 +105,20 @@ else
 fi
 
 DATA_FILE="${OUT_DIR}/profile.dat"
-ROOFLINE_PLOT="${OUT_DIR}/roofline-${ROOFLINE_PRECISION}.pdf"
-INSTMIX_PLOT="${OUT_DIR}/instmix.pdf"
+ROOFLINE_SP_PS="${OUT_DIR}/roofline-fp32.ps"
+ROOFLINE_SP_PDF="${OUT_DIR}/roofline-fp32.pdf"
+ROOFLINE_DP_PS="${OUT_DIR}/roofline-fp64.ps"
+ROOFLINE_DP_PDF="${OUT_DIR}/roofline-fp64.pdf"
+ROOFLINE_INST_PS="${OUT_DIR}/roofline-inst.ps"
+ROOFLINE_INST_PDF="${OUT_DIR}/roofline-inst.pdf"
+ROOFLINE_SHARED_PS="${OUT_DIR}/roofline-shared.ps"
+ROOFLINE_SHARED_PDF="${OUT_DIR}/roofline-shared.pdf"
+INSTMIX_PS="${OUT_DIR}/instmix.ps"
+INSTMIX_PDF="${OUT_DIR}/instmix.pdf"
+OCCUPANCY_PS="${OUT_DIR}/hist-occupancy.ps"
+OCCUPANCY_PDF="${OUT_DIR}/hist-occupancy.pdf"
+PREDICATION_PS="${OUT_DIR}/hist-predication.ps"
+PREDICATION_PDF="${OUT_DIR}/hist-predication.pdf"
 
 ensure_out_dir() {
   mkdir -p "$OUT_DIR"
@@ -124,7 +144,7 @@ run_profiler() {
 
 build_dat() {
   if [ -z "$KERNELS" ]; then
-    echo "ERROR: KERNELS is required for dat/plot/instmix." >&2
+    echo "ERROR: KERNELS is required for dat/plot/fp/dp/inst/shared/instmix/occupancy/predication." >&2
     exit 1
   fi
   if [ -z "$WORKLOAD_PATH" ] || [ ! -d "$WORKLOAD_PATH" ]; then
@@ -137,26 +157,84 @@ build_dat() {
     > "${DATA_FILE}.tmp" && mv "${DATA_FILE}.tmp" "$DATA_FILE"
 }
 
-plot_roofline() {
+plot_fp() {
   build_dat
-  "$GNUPLOT" -e "outfile='${ROOFLINE_PLOT}';precision='${ROOFLINE_PRECISION}'" \
+  "$GNUPLOT" -e "outfile='${ROOFLINE_SP_PS}';precision='fp'" \
     "$DATA_FILE" "${SCRIPT_DIR}/roofline.gnuplot"
+  "$PSTOPDF" "${ROOFLINE_SP_PS}" "${ROOFLINE_SP_PDF}"
+}
+
+plot_roofline() {
+  case "${ROOFLINE_PRECISION}" in
+    fp64|dp) plot_dp ;;
+    *) plot_fp ;;
+  esac
+}
+
+plot_dp() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${ROOFLINE_DP_PS}';precision='dp'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/roofline.gnuplot"
+  "$PSTOPDF" "${ROOFLINE_DP_PS}" "${ROOFLINE_DP_PDF}"
+}
+
+plot_inst() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${ROOFLINE_INST_PS}'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/roofline-inst.gnuplot"
+  "$PSTOPDF" "${ROOFLINE_INST_PS}" "${ROOFLINE_INST_PDF}"
+}
+
+plot_shared() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${ROOFLINE_SHARED_PS}'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/roofline-shared.gnuplot"
+  "$PSTOPDF" "${ROOFLINE_SHARED_PS}" "${ROOFLINE_SHARED_PDF}"
 }
 
 plot_instmix() {
   build_dat
-  "$GNUPLOT" -e "infile='${DATA_FILE}';outfile='${INSTMIX_PLOT}'" \
+  "$GNUPLOT" -e "infile='${DATA_FILE}';outfile='${INSTMIX_PS}'" \
     "${SCRIPT_DIR}/instmix.hist.gnuplot"
+  "$PSTOPDF" "${INSTMIX_PS}" "${INSTMIX_PDF}"
+}
+
+plot_occupancy() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${OCCUPANCY_PS}'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/hist-occupancy.gnuplot"
+  "$PSTOPDF" "${OCCUPANCY_PS}" "${OCCUPANCY_PDF}"
+}
+
+plot_predication() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${PREDICATION_PS}'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/hist-predication.gnuplot"
+  "$PSTOPDF" "${PREDICATION_PS}" "${PREDICATION_PDF}"
 }
 
 clean() {
-  rm -f "$DATA_FILE" "$ROOFLINE_PLOT" "$INSTMIX_PLOT"
+  rm -f \
+    "$DATA_FILE" \
+    "$ROOFLINE_SP_PS" "$ROOFLINE_SP_PDF" \
+    "$ROOFLINE_DP_PS" "$ROOFLINE_DP_PDF" \
+    "$ROOFLINE_INST_PS" "$ROOFLINE_INST_PDF" \
+    "$ROOFLINE_SHARED_PS" "$ROOFLINE_SHARED_PDF" \
+    "$INSTMIX_PS" "$INSTMIX_PDF" \
+    "$OCCUPANCY_PS" "$OCCUPANCY_PDF" \
+    "$PREDICATION_PS" "$PREDICATION_PDF"
 }
 
 for t in "${targets[@]}"; do
   case "$t" in
     all)
-      plot_roofline
+      plot_fp
+      plot_dp
+      plot_inst
+      plot_shared
+      plot_instmix
+      plot_occupancy
+      plot_predication
       ;;
     profile)
       run_profiler
@@ -167,8 +245,26 @@ for t in "${targets[@]}"; do
     plot)
       plot_roofline
       ;;
+    fp)
+      plot_fp
+      ;;
+    dp)
+      plot_dp
+      ;;
+    inst)
+      plot_inst
+      ;;
+    shared)
+      plot_shared
+      ;;
     instmix)
       plot_instmix
+      ;;
+    occupancy)
+      plot_occupancy
+      ;;
+    predication)
+      plot_predication
       ;;
     clean)
       clean
