@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+import argparse
+import csv
+import re
+import sys
+from collections import defaultdict
+
+
+def norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").strip().lower()).strip()
+
+
+def escape_gnuplot_string(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def parse_number(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    s = s.replace(",", "")
+    m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def read_csv_rows(path):
+    with open(path, newline="", encoding="utf-8") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.DictReader(f, dialect=dialect)
+        rows = [r for r in reader if r]
+        headers = reader.fieldnames or []
+    return headers, rows
+
+
+def find_col(headers, aliases):
+    normalized = [(h, norm(h)) for h in headers]
+    for alias in aliases:
+        if isinstance(alias, str):
+            token = norm(alias)
+            for h, nh in normalized:
+                if token and token in nh:
+                    return h
+        else:
+            need = [norm(x) for x in alias]
+            for h, nh in normalized:
+                if all(n in nh for n in need):
+                    return h
+    return None
+
+
+def to_pct(v):
+    if v is None:
+        return 0.0
+    if 0.0 <= v <= 1.0:
+        return v * 100.0
+    return v
+
+
+def avg(xs, default=0.0):
+    vals = [x for x in xs if x is not None]
+    if not vals:
+        return default
+    return sum(vals) / len(vals)
+
+
+def kernel_point_types(n):
+    base = [5, 7, 9, 11, 13, 3, 4, 6, 8, 10, 12]
+    out = []
+    i = 0
+    while len(out) < n:
+        out.append(base[i % len(base)])
+        i += 1
+    return out
+
+
+def match_rows(rows, kernel_col, label):
+    needle = label.strip()
+    if not needle:
+        return []
+    return [r for r in rows if needle in (r.get(kernel_col) or "")]
+
+
+def compute_instmix(metrics_rows, kernel_col, label, cols):
+    subset = match_rows(metrics_rows, kernel_col, label)
+    if not subset:
+        return dict(fp=0.0, integer=0.0, mem=0.0, cf=0.0, comm=0.0, misc=0.0)
+
+    buckets = {}
+    for key, col in cols.items():
+        if col is None:
+            buckets[key] = 0.0
+            continue
+        vals = [parse_number(r.get(col)) for r in subset]
+        buckets[key] = sum(v for v in vals if v is not None)
+
+    total = sum(max(0.0, v) for v in buckets.values())
+    if total <= 0.0:
+        return dict(fp=0.0, integer=0.0, mem=0.0, cf=0.0, comm=0.0, misc=0.0)
+
+    return {
+        "fp": 100.0 * max(0.0, buckets["fp"]) / total,
+        "integer": 100.0 * max(0.0, buckets["integer"]) / total,
+        "mem": 100.0 * max(0.0, buckets["mem"]) / total,
+        "cf": 100.0 * max(0.0, buckets["cf"]) / total,
+        "comm": 100.0 * max(0.0, buckets["comm"]) / total,
+        "misc": 100.0 * max(0.0, buckets["misc"]) / total,
+    }
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Generate gnuplot data for Intel GPU roofline/summary plots from CSV exports."
+    )
+    p.add_argument("--roofline", required=True, help="Advisor roofline CSV path")
+    p.add_argument("--metrics", help="Optional metrics CSV path (unitrace/VTune export)")
+    p.add_argument("--kernels", required=True, help="Comma-separated kernel substrings")
+    p.add_argument("--precision", choices=["fp", "dp", "fp32", "fp64"], default="fp")
+    p.add_argument("--peak-fp", type=float)
+    p.add_argument("--peak-dp", type=float)
+    p.add_argument("--l1-peak", type=float)
+    p.add_argument("--l2-peak", type=float)
+    p.add_argument("--hbm-peak", type=float)
+    args = p.parse_args()
+
+    kernels = [k.strip() for k in args.kernels.split(",") if k.strip()]
+    if not kernels:
+        raise ValueError("No kernels provided")
+
+    roof_headers, roof_rows = read_csv_rows(args.roofline)
+    if not roof_rows:
+        raise ValueError(f"No rows in roofline CSV: {args.roofline}")
+
+    kernel_col = find_col(
+        roof_headers,
+        ["kernel", "kernel name", "function", "task", "loop", ("compute", "name")],
+    )
+    if kernel_col is None:
+        raise ValueError(
+            "Could not find a kernel column in roofline CSV. Expected a header containing kernel/function/task."
+        )
+
+    sp_perf_col = find_col(
+        roof_headers,
+        [
+            ("gflop", "s"),
+            ("fp32", "gflop"),
+            ("single", "gflop"),
+            ("gpu", "gflop"),
+            ("compute", "gflop"),
+            ("achieved", "gflop"),
+        ],
+    )
+    dp_perf_col = find_col(
+        roof_headers,
+        [
+            ("fp64", "gflop"),
+            ("double", "gflop"),
+            ("dp", "gflop"),
+        ],
+    )
+    ai_hbm_col = find_col(
+        roof_headers,
+        [
+            ("arithmetic", "intensity"),
+            ("flop", "byte"),
+            "ai",
+        ],
+    )
+    ai_l2_col = find_col(roof_headers, [("l2", "intensity"), ("l3", "intensity")])
+    ai_l1_col = find_col(roof_headers, [("l1", "intensity")])
+
+    if sp_perf_col is None:
+        raise ValueError(
+            "Could not find an FP performance column in roofline CSV. Expected headers with GFLOP/s-like names."
+        )
+    if ai_hbm_col is None:
+        raise ValueError(
+            "Could not find arithmetic intensity column in roofline CSV. Expected headers with Arithmetic Intensity/FLOP/Byte."
+        )
+
+    bw_hbm_col = find_col(
+        roof_headers,
+        [
+            ("bandwidth", "gb", "s"),
+            ("memory", "bandwidth"),
+            ("dram", "gb", "s"),
+            ("hbm", "gb", "s"),
+        ],
+    )
+    bw_l2_col = find_col(roof_headers, [("l2", "bandwidth"), ("l3", "bandwidth")])
+    bw_l1_col = find_col(roof_headers, [("l1", "bandwidth")])
+
+    metrics_headers = []
+    metrics_rows = []
+    metrics_kernel_col = None
+    if args.metrics:
+        metrics_headers, metrics_rows = read_csv_rows(args.metrics)
+        if metrics_rows:
+            metrics_kernel_col = find_col(
+                metrics_headers,
+                ["kernel", "kernel name", "function", "task", "compute"],
+            )
+
+    eu_active_col = find_col(metrics_headers, [("eu", "active"), ("gpu", "active"), "occupancy"])
+    eu_peak_col = find_col(metrics_headers, [("eu", "peak"), ("max", "occupancy")])
+    simd_eff_col = find_col(
+        metrics_headers,
+        [
+            ("simd", "util"),
+            ("thread", "eff"),
+            ("predication",),
+            ("active", "lane"),
+        ],
+    )
+
+    instmix_cols = {
+        "fp": find_col(metrics_headers, [("fp", "instruction"), ("floating", "instruction")]),
+        "integer": find_col(metrics_headers, [("int", "instruction"), ("integer", "instruction")]),
+        "mem": find_col(metrics_headers, [("mem", "instruction"), ("load", "instruction"), ("store", "instruction")]),
+        "cf": find_col(metrics_headers, [("branch", "instruction"), ("control", "flow")]),
+        "comm": find_col(metrics_headers, [("send", "instruction"), ("barrier", "instruction"), ("sync", "instruction")]),
+        "misc": find_col(metrics_headers, [("misc", "instruction"), ("other", "instruction")]),
+    }
+
+    point_types = kernel_point_types(len(kernels))
+
+    roofline_sp_points = []
+    roofline_dp_points = []
+    roofline_inst_points = []
+    roofline_shared_points = []
+    occupancy_block = ["# kernel sustained_occupancy_pct peak_occupancy_margin_pct"]
+    predication_block = ["# kernel efficiency"]
+    instmix_block = []
+    kernel_stats = ["# kernel sp_perf dp_perf hbm_ai"]
+
+    values_for_peaks = defaultdict(list)
+
+    lines = []
+    lines.append(f"kernel_count = {len(kernels)}")
+
+    for idx, label in enumerate(kernels):
+        subset = match_rows(roof_rows, kernel_col, label)
+        if not subset:
+            print(f"[intel2dat] warning: no roofline rows matched kernel substring '{label}'", file=sys.stderr)
+
+        sp_perf = avg([parse_number(r.get(sp_perf_col)) for r in subset], default=0.0)
+        dp_perf = avg([parse_number(r.get(dp_perf_col)) for r in subset], default=sp_perf * 0.5)
+        hbm_ai = avg([parse_number(r.get(ai_hbm_col)) for r in subset], default=0.0)
+        l2_ai = avg([parse_number(r.get(ai_l2_col)) for r in subset], default=hbm_ai) if ai_l2_col else hbm_ai
+        l1_ai = avg([parse_number(r.get(ai_l1_col)) for r in subset], default=l2_ai) if ai_l1_col else l2_ai
+
+        inst_perf = sp_perf
+        hbm_inst_ai = hbm_ai
+        l2_inst_ai = l2_ai
+        l1_inst_ai = l1_ai
+
+        shared_perf = inst_perf
+        shared_ai = l1_ai
+
+        escaped = escape_gnuplot_string(label)
+        point = point_types[idx]
+        lines.append(f'kernel_name_{idx} = "{escaped}"')
+        lines.append(f"kernel_point_{idx} = {point}")
+        lines.append(f"k{idx}_sp_perf = {sp_perf}")
+        lines.append(f"k{idx}_dp_perf = {dp_perf}")
+        lines.append(f"k{idx}_l1_sp_intensity = {l1_ai}")
+        lines.append(f"k{idx}_l2_sp_intensity = {l2_ai}")
+        lines.append(f"k{idx}_hbm_sp_intensity = {hbm_ai}")
+        lines.append(f"k{idx}_l1_dp_intensity = {l1_ai}")
+        lines.append(f"k{idx}_l2_dp_intensity = {l2_ai}")
+        lines.append(f"k{idx}_hbm_dp_intensity = {hbm_ai}")
+        lines.append(f"k{idx}_inst_perf = {inst_perf}")
+        lines.append(f"k{idx}_l1_inst_intensity = {l1_inst_ai}")
+        lines.append(f"k{idx}_l2_inst_intensity = {l2_inst_ai}")
+        lines.append(f"k{idx}_hbm_inst_intensity = {hbm_inst_ai}")
+        lines.append(f"k{idx}_warp_shared_instruction_performance = {shared_perf}")
+        lines.append(f"k{idx}_shared_warp_inst_intensity = {shared_ai}")
+
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_sp_intensity):(k{idx}_sp_perf) with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_sp_intensity):(k{idx}_sp_perf) with points lc rgb l2_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_sp_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_sp_intensity):(k{idx}_sp_perf) with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
+        )
+
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_dp_intensity):(k{idx}_dp_perf) with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_dp_intensity):(k{idx}_dp_perf) with points lc rgb l2_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_dp_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_dp_intensity):(k{idx}_dp_perf) with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
+        )
+
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_inst_intensity):(k{idx}_inst_perf) with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_inst_intensity):(k{idx}_inst_perf) with points lc rgb l2_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_inst_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_inst_intensity):(k{idx}_inst_perf) with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
+        )
+
+        roofline_shared_points.append(
+            f"[0:0:1] '+' us (k{idx}_shared_warp_inst_intensity):(k{idx}_warp_shared_instruction_performance) with points lc rgb shared_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+
+        if metrics_rows and metrics_kernel_col:
+            msubset = match_rows(metrics_rows, metrics_kernel_col, label)
+            active = to_pct(avg([parse_number(r.get(eu_active_col)) for r in msubset], default=0.0)) if eu_active_col else 0.0
+            peak_occ = to_pct(avg([parse_number(r.get(eu_peak_col)) for r in msubset], default=100.0)) if eu_peak_col else 100.0
+            peak_margin = max(0.0, peak_occ - active)
+            pred = to_pct(avg([parse_number(r.get(simd_eff_col)) for r in msubset], default=active)) if simd_eff_col else active
+            mix = compute_instmix(metrics_rows, metrics_kernel_col, label, instmix_cols)
+        else:
+            active = 0.0
+            peak_margin = 0.0
+            pred = 0.0
+            mix = dict(fp=0.0, integer=0.0, mem=0.0, cf=0.0, comm=0.0, misc=0.0)
+
+        occupancy_block.append(f'"{escaped}" {active} {peak_margin}')
+        predication_block.append(f'"{escaped}" {pred}')
+        instmix_block.append(
+            f'"{escaped}" {mix["misc"]} {mix["comm"]} {mix["cf"]} {mix["mem"]} {mix["integer"]} {mix["fp"]}'
+        )
+        kernel_stats.append(f'"{escaped}" {sp_perf} {dp_perf} {hbm_ai}')
+
+        values_for_peaks["sp"].append(sp_perf)
+        values_for_peaks["dp"].append(dp_perf)
+        values_for_peaks["hbm_ai"].append(hbm_ai)
+
+    # Global peaks used by gnuplot roofs.
+    peak_fp = args.peak_fp if args.peak_fp is not None else max(values_for_peaks["sp"] + [1.0])
+    peak_dp = args.peak_dp if args.peak_dp is not None else max(values_for_peaks["dp"] + [0.5])
+    peak_nofma_fp = peak_fp / 2.0
+    peak_nofma_dp = peak_dp / 2.0
+
+    l1_peak = args.l1_peak
+    if l1_peak is None and bw_l1_col:
+        l1_peak = avg([parse_number(r.get(bw_l1_col)) for r in roof_rows], default=0.0)
+    l2_peak = args.l2_peak
+    if l2_peak is None and bw_l2_col:
+        l2_peak = avg([parse_number(r.get(bw_l2_col)) for r in roof_rows], default=0.0)
+    hbm_peak = args.hbm_peak
+    if hbm_peak is None and bw_hbm_col:
+        hbm_peak = avg([parse_number(r.get(bw_hbm_col)) for r in roof_rows], default=0.0)
+
+    # fallbacks preserve plot rendering even when bandwidth columns are absent.
+    if hbm_peak is None or hbm_peak <= 0.0:
+        hbm_peak = 1.0
+    if l2_peak is None or l2_peak <= 0.0:
+        l2_peak = hbm_peak * 1.5
+    if l1_peak is None or l1_peak <= 0.0:
+        l1_peak = l2_peak * 1.5
+
+    inst_peak = max(values_for_peaks["sp"] + [1.0])
+
+    lines.append(f"peak_fp = {peak_fp}")
+    lines.append(f"peak_dp = {peak_dp}")
+    lines.append(f"peak_nofma_fp = {peak_nofma_fp}")
+    lines.append(f"peak_nofma_dp = {peak_nofma_dp}")
+    lines.append(f"inst_peak = {inst_peak}")
+    lines.append(f"l1_peak = {l1_peak}")
+    lines.append(f"l2_peak = {l2_peak}")
+    lines.append(f"hbm_peak = {hbm_peak}")
+    lines.append(f"l1_peak_txn = {l1_peak}")
+    lines.append(f"l2_peak_txn = {l2_peak}")
+    lines.append(f"hbm_peak_txn = {hbm_peak}")
+
+    lines.append('roofline_sp_points = "' + ", ".join(roofline_sp_points) + '"')
+    lines.append('roofline_dp_points = "' + ", ".join(roofline_dp_points) + '"')
+    lines.append('roofline_inst_points = "' + ", ".join(roofline_inst_points) + '"')
+    lines.append('roofline_shared_points = "' + ", ".join(roofline_shared_points) + '"')
+
+    out = []
+    out.extend(lines)
+    out.append("")
+    out.append("$instmix << EOD")
+    out.extend(instmix_block)
+    out.append("EOD")
+    out.append("")
+    out.append("$occupancy << EOD")
+    out.extend(occupancy_block)
+    out.append("EOD")
+    out.append("")
+    out.append("$predication << EOD")
+    out.extend(predication_block)
+    out.append("EOD")
+    out.append("")
+    out.append("$kernel_stats << EOD")
+    out.extend(kernel_stats)
+    out.append("EOD")
+
+    print("\n".join(out))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"intel2dat: error: {e}", file=sys.stderr)
+        sys.exit(1)

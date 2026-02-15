@@ -7,5 +7,6 @@ This repository is organized by vendor:
 
 - `gpu/nvidia/` contains NVIDIA-specific profiling scripts and tooling.
 - `gpu/amd/` contains AMD-specific profiling scripts and tooling.
+- `gpu/intel/` contains Intel-specific profiling scripts and tooling.
 
 See each vendor README for usage details.

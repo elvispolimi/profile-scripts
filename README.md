@@ -7,12 +7,14 @@ profiling runs rather than one-off GUI sessions.
 Vendors supported today:
 - NVIDIA (Nsight Compute)
 - AMD (ROCProfiler/rocprof-style workflows)
+- Intel (Advisor + optional PTI/VTune CSV inputs)
 
 The repository is organized under `gpu/<vendor>/`.
 
 - `gpu/README.md` explains the hierarchy.
 - `gpu/nvidia/README.md` covers NVIDIA usage and tooling.
 - `gpu/amd/README.md` covers AMD usage and tooling.
+- `gpu/intel/README.md` covers Intel usage and tooling.
 
 ## Acknowledgements
 
