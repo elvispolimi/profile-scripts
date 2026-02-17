@@ -33,6 +33,7 @@ Variables (same names as old Makefile):
   ROOFLINE_DATA_TYPE (default: FP32)
   PROFILER_CMD                      Full command override
   AMD2DAT (default: ./omniperf2dat)
+  AMD2DAT_ARGS                      Extra args passed to omniperf2dat
   GNUPLOT (default: gnuplot)
   PSTOPDF (default: ps2pdf)
   ROOFLINE_PRECISION (default: fp32)
@@ -77,6 +78,7 @@ ROOF_ONLY="${ROOF_ONLY:-1}"
 ROOFLINE_DATA_TYPE="${ROOFLINE_DATA_TYPE:-FP32}"
 PROFILER_CMD="${PROFILER_CMD:-}"
 AMD2DAT="${AMD2DAT:-${SCRIPT_DIR}/omniperf2dat}"
+AMD2DAT_ARGS="${AMD2DAT_ARGS:-}"
 GNUPLOT="${GNUPLOT:-gnuplot}"
 PSTOPDF="${PSTOPDF:-ps2pdf}"
 ROOFLINE_PRECISION="${ROOFLINE_PRECISION:-fp32}"
@@ -154,6 +156,7 @@ build_dat() {
   fi
   ensure_out_dir
   "$AMD2DAT" --workload "$WORKLOAD_PATH" --kernels "$KERNELS" --precision "$ROOFLINE_PRECISION" \
+    $AMD2DAT_ARGS \
     > "${DATA_FILE}.tmp" && mv "${DATA_FILE}.tmp" "$DATA_FILE"
 }
 

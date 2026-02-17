@@ -365,6 +365,10 @@ def accumulate(d):
     return {k: sum(v) for k, v in d.items()}
 
 
+def average_metrics(d):
+    return {k: statistics.mean(v) for k, v in d.items() if v}
+
+
 def average_dicts(dicts):
     totals = defaultdict(float)
     counts = defaultdict(int)
@@ -399,6 +403,15 @@ def kernel_label(name, kernels):
     return None
 
 
+def is_kernel_header_line(stripped):
+    return (
+        ", Context " in stripped
+        and ", Stream " in stripped
+        and ", Device " in stripped
+        and ", CC " in stripped
+    )
+
+
 def transform(f, kernels, tensor_flop_factor):
     r = csv.DictReader(f, delimiter=",", quotechar='"')
     metrics_by_kernel = defaultdict(lambda: defaultdict(list))
@@ -415,7 +428,9 @@ def transform(f, kernels, tensor_flop_factor):
         metrics_by_kernel[label][metric_name].append(value)
     data_by_kernel = {}
     for kernel_name, metrics in metrics_by_kernel.items():
-        data_by_kernel[kernel_name] = canonicalize(accumulate(metrics), tensor_flop_factor)
+        data_by_kernel[kernel_name] = canonicalize(
+            average_metrics(metrics), tensor_flop_factor, arch=None
+        )
     return data_by_kernel, kernel_order
 
 
@@ -432,7 +447,7 @@ def parse_raw_metrics(f, kernels):
             continue
         if stripped.startswith(("==PROF==", "[", "Metric Name", "---")):
             continue
-        if stripped.startswith("void "):
+        if is_kernel_header_line(stripped):
             active_kernel = stripped
             active_label = kernel_label(stripped, kernels)
             active = active_label is not None
@@ -454,10 +469,7 @@ def parse_raw_metrics(f, kernels):
         if active and active_label:
             metrics_by_kernel[active_label][name].append(value)
             units_by_kernel[active_label][name] = unit
-    accumulated = {}
-    for kernel_name, metrics in metrics_by_kernel.items():
-        accumulated[kernel_name] = accumulate(metrics)
-    return accumulated, units_by_kernel, kernel_order
+    return metrics_by_kernel, units_by_kernel, kernel_order
 
 
 CANONICAL_KEYS = [
@@ -508,22 +520,9 @@ def safe_div(numerator, denominator):
 
 def data_to_roofline_vars(data):
     elapsed_s = data["elapsed_s"]
-    sp_flops_per_s = data.get("sp_flops_per_s")
-    dp_flops_per_s = data.get("dp_flops_per_s")
-    sp_perf = (
-        safe_div(sp_flops_per_s, 1000000000.0)
-        if sp_flops_per_s is not None
-        else safe_div(data["fp_flop"], elapsed_s * 1000000000.0)
-    )
-    dp_perf = (
-        safe_div(dp_flops_per_s, 1000000000.0)
-        if dp_flops_per_s is not None
-        else safe_div(data["dp_flop"], elapsed_s * 1000000000.0)
-    )
+    sp_perf = safe_div(data["fp_flop"], elapsed_s * 1000000000.0)
+    dp_perf = safe_div(data["dp_flop"], elapsed_s * 1000000000.0)
     inst_perf = safe_div(data["thread_instructions"], elapsed_s * 1000000000.0)
-    l1_bytes_per_s = data.get("l1_bytes_per_s")
-    l2_bytes_per_s = data.get("l2_bytes_per_s")
-    hbm_bytes_per_s = data.get("hbm_bytes_per_s")
     return {
         "sp_perf": sp_perf,
         "dp_perf": dp_perf,
@@ -534,24 +533,12 @@ def data_to_roofline_vars(data):
         "shared_warp_inst_intensity": safe_div(
             data["warp_shared_ld_st_instructions"], data["warp_shared_transactions"]
         ),
-        "l1_sp_intensity": safe_div(sp_flops_per_s, l1_bytes_per_s)
-        if sp_flops_per_s is not None and l1_bytes_per_s is not None
-        else safe_div(data["fp_flop"], data["l1_bytes"]),
-        "l2_sp_intensity": safe_div(sp_flops_per_s, l2_bytes_per_s)
-        if sp_flops_per_s is not None and l2_bytes_per_s is not None
-        else safe_div(data["fp_flop"], data["l2_bytes"]),
-        "hbm_sp_intensity": safe_div(sp_flops_per_s, hbm_bytes_per_s)
-        if sp_flops_per_s is not None and hbm_bytes_per_s is not None
-        else safe_div(data["fp_flop"], data["dram_bytes"]),
-        "l1_dp_intensity": safe_div(dp_flops_per_s, l1_bytes_per_s)
-        if dp_flops_per_s is not None and l1_bytes_per_s is not None
-        else safe_div(data["dp_flop"], data["l1_bytes"]),
-        "l2_dp_intensity": safe_div(dp_flops_per_s, l2_bytes_per_s)
-        if dp_flops_per_s is not None and l2_bytes_per_s is not None
-        else safe_div(data["dp_flop"], data["l2_bytes"]),
-        "hbm_dp_intensity": safe_div(dp_flops_per_s, hbm_bytes_per_s)
-        if dp_flops_per_s is not None and hbm_bytes_per_s is not None
-        else safe_div(data["dp_flop"], data["dram_bytes"]),
+        "l1_sp_intensity": safe_div(data["fp_flop"], data["l1_bytes"]),
+        "l2_sp_intensity": safe_div(data["fp_flop"], data["l2_bytes"]),
+        "hbm_sp_intensity": safe_div(data["fp_flop"], data["dram_bytes"]),
+        "l1_dp_intensity": safe_div(data["dp_flop"], data["l1_bytes"]),
+        "l2_dp_intensity": safe_div(data["dp_flop"], data["l2_bytes"]),
+        "hbm_dp_intensity": safe_div(data["dp_flop"], data["dram_bytes"]),
         "l1_inst_intensity": safe_div(
             data["thread_instructions"], data["l1_total_32B_transactions"]
         ),
@@ -561,17 +548,6 @@ def data_to_roofline_vars(data):
 
 
 def merge_kernel_dicts(dicts, kernel_order):
-    rate_keys = {
-        "sp_flops_per_s",
-        "dp_flops_per_s",
-        "l1_bytes_per_s",
-        "l2_bytes_per_s",
-        "hbm_bytes_per_s",
-        "flops",
-        "efficiency",
-        "peak_occupancy_margin_pct",
-        "sustained_occupancy_pct",
-    }
     merged = {}
     for kernel in kernel_order:
         per_kernel = []
@@ -586,17 +562,11 @@ def merge_kernel_dicts(dicts, kernel_order):
             for k, v in d.items():
                 if v is None:
                     continue
-                if k in rate_keys or k.endswith("_pct"):
-                    sums[k] += v
-                    counts[k] += 1
-                else:
-                    sums[k] += v
+                sums[k] += v
+                counts[k] += 1
         merged_kernel = {}
         for k, v in sums.items():
-            if k in rate_keys or k.endswith("_pct"):
-                merged_kernel[k] = v / counts[k] if counts[k] else 0.0
-            else:
-                merged_kernel[k] = v
+            merged_kernel[k] = v / counts[k] if counts[k] else 0.0
         merged[kernel] = merged_kernel
     return merged
 
@@ -931,21 +901,24 @@ if __name__ == "__main__":
                     for key in raw_keys:
                         if key in metrics:
                             unit = units_by_kernel[kernel_name].get(key, "")
+                            avg = statistics.mean(metrics[key])
                             print(
-                                f"[debug-ai-raw] {kernel_name} {key}={metrics[key]} {unit}",
+                                f"[debug-ai-raw] {kernel_name} {key}={avg} {unit}",
                                 file=sys.stderr,
                             )
             run_data = {}
-            for kernel_name, metrics in metrics_by_kernel.items():
+            for kernel_name, metric_lists in metrics_by_kernel.items():
+                metrics = average_metrics(metric_lists)
                 run_data[kernel_name] = raw_to_data(
                     metrics, units_by_kernel[kernel_name], args.tensor_flop_factor, args.arch
                 )
             data_runs.append(run_data)
             if run_order:
                 first_kernel = run_order[0]
+                first_kernel_metrics = average_metrics(metrics_by_kernel[first_kernel])
                 peaks_runs.append(
                     peaks_from_raw(
-                        metrics_by_kernel[first_kernel],
+                        first_kernel_metrics,
                         units_by_kernel[first_kernel],
                         args.arch,
                     )
@@ -971,9 +944,10 @@ if __name__ == "__main__":
     if args.raw and args.input:
         metrics_by_kernel, units_by_kernel, run_order = parse_raw_metrics(args.raw[0], kernels)
         if run_order:
+            first_kernel = run_order[0]
             peaks = peaks_from_raw(
-                metrics_by_kernel[run_order[0]],
-                units_by_kernel[run_order[0]],
+                average_metrics(metrics_by_kernel[first_kernel]),
+                units_by_kernel[first_kernel],
                 args.arch,
             )
     if peaks:

@@ -87,18 +87,18 @@ def parse_roofline_peaks(path):
             col = find_col(headers, candidates)
             if not col:
                 continue
-            best = None
+            values = []
             for row in rows:
                 val = parse_number(row.get(col))
                 if val is None:
                     continue
-                if best is None or val > best:
-                    best = val
-            if best is not None:
-                peaks[key] = best
+                values.append(val)
+            if values:
+                peaks[key] = sum(values) / len(values)
         if peaks:
             return peaks
 
+    fallback_values = defaultdict(list)
     with open(path, "r") as f:
         for line in f:
             lower = line.lower()
@@ -112,7 +112,10 @@ def parse_roofline_peaks(path):
                 if any(p in lower for p in patterns):
                     val = parse_number(line)
                     if val is not None:
-                        peaks[key] = val
+                        fallback_values[key].append(val)
+    for key, values in fallback_values.items():
+        if values:
+            peaks[key] = sum(values) / len(values)
     return peaks
 
 
@@ -120,6 +123,34 @@ def safe_div(numerator, denominator):
     if denominator in (None, 0):
         return 0.0
     return numerator / denominator
+
+
+def merge_kernel_metrics_average(per_run_data):
+    sums = defaultdict(lambda: defaultdict(float))
+    counts = defaultdict(lambda: defaultdict(int))
+    for run_data in per_run_data:
+        for kernel, metrics in run_data.items():
+            for key, value in metrics.items():
+                sums[kernel][key] += value
+                counts[kernel][key] += 1
+    merged = {}
+    for kernel, key_totals in sums.items():
+        merged[kernel] = {
+            key: key_totals[key] / counts[kernel][key]
+            for key in key_totals
+            if counts[kernel][key]
+        }
+    return merged
+
+
+def average_peak_dicts(peaks_list):
+    sums = defaultdict(float)
+    counts = defaultdict(int)
+    for peaks in peaks_list:
+        for key, value in peaks.items():
+            sums[key] += value
+            counts[key] += 1
+    return {key: sums[key] / counts[key] for key in sums if counts[key]}
 
 
 def collect_kernel_metrics(rows, headers, kernels, args):
@@ -248,7 +279,14 @@ def collect_kernel_metrics(rows, headers, kernels, args):
     mfma_f64_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_F64"], None)
     mfma_i8_col = find_col(headers, ["SQ_INSTS_VALU_MFMA_I8"], None)
 
-    data = defaultdict(lambda: defaultdict(float))
+    sums = defaultdict(lambda: defaultdict(float))
+    counts = defaultdict(lambda: defaultdict(int))
+
+    def add(label, key, value):
+        if value is None:
+            return
+        sums[label][key] += value
+        counts[label][key] += 1
 
     for row in rows:
         kernel_name = row.get(kernel_col, "")
@@ -264,74 +302,71 @@ def collect_kernel_metrics(rows, headers, kernels, args):
         if time_val is not None and time_col and "ns" in time_col.lower():
             time_val *= 1e-9
 
-        if fp32_flop is not None and time_val:
-            data[label]["fp32_flop"] += fp32_flop
-            data[label]["time_s"] += time_val
+        if fp32_flop is not None and time_val not in (None, 0):
+            add(label, "fp32_flop", fp32_flop)
+            add(label, "time_s", time_val)
         elif fp32_perf_col:
             perf = parse_number(row.get(fp32_perf_col))
-            if perf is not None:
-                data[label]["fp32_perf_sum"] += perf
-                data[label]["fp32_perf_count"] += 1
+            add(label, "fp32_perf", perf)
 
-        if fp64_flop is not None and time_val:
-            data[label]["fp64_flop"] += fp64_flop
-            data[label]["time_s"] += time_val
+        if fp64_flop is not None and time_val not in (None, 0):
+            add(label, "fp64_flop", fp64_flop)
+            add(label, "time_s", time_val)
         elif fp64_perf_col:
             perf = parse_number(row.get(fp64_perf_col))
-            if perf is not None:
-                data[label]["fp64_perf_sum"] += perf
-                data[label]["fp64_perf_count"] += 1
+            add(label, "fp64_perf", perf)
 
         if l1_bytes_col:
             val = parse_number(row.get(l1_bytes_col))
-            if val is not None:
-                data[label]["l1_bytes"] += val
+            add(label, "l1_bytes", val)
         if l2_bytes_col:
             val = parse_number(row.get(l2_bytes_col))
-            if val is not None:
-                data[label]["l2_bytes"] += val
+            add(label, "l2_bytes", val)
         if hbm_bytes_col:
             val = parse_number(row.get(hbm_bytes_col))
-            if val is not None:
-                data[label]["hbm_bytes"] += val
+            add(label, "hbm_bytes", val)
         if lds_bytes_col:
             val = parse_number(row.get(lds_bytes_col))
-            if val is not None:
-                data[label]["lds_bytes"] += val
+            add(label, "lds_bytes", val)
 
         insts = parse_number(row.get(insts_col)) if insts_col else None
-        if insts is not None:
-            data[label]["insts"] += insts
+        add(label, "insts", insts)
 
         mem_inst = 0.0
+        mem_seen = False
         for col in (smem_col, lds_col, vmem_rd_col, vmem_wr_col):
             val = parse_number(row.get(col)) if col else None
             if val is not None:
                 mem_inst += val
-        if mem_inst:
-            data[label]["mem_inst"] += mem_inst
+                mem_seen = True
+        if mem_seen:
+            add(label, "mem_inst", mem_inst)
 
         cf_inst = parse_number(row.get(branch_col)) if branch_col else None
-        if cf_inst is not None:
-            data[label]["cf_inst"] += cf_inst
+        add(label, "cf_inst", cf_inst)
 
         shared_inst = 0.0
+        shared_seen = False
         for col in (smem_col, lds_col):
             val = parse_number(row.get(col)) if col else None
             if val is not None:
                 shared_inst += val
-        if shared_inst:
-            data[label]["shared_inst"] += shared_inst
+                shared_seen = True
+        if shared_seen:
+            add(label, "shared_inst", shared_inst)
 
         int_inst = 0.0
+        int_seen = False
         for col in (valu_i32_col, valu_i64_col):
             val = parse_number(row.get(col)) if col else None
             if val is not None:
                 int_inst += val
-        if int_inst:
-            data[label]["int_inst"] += int_inst
+                int_seen = True
+        if int_seen:
+            add(label, "int_inst", int_inst)
 
         fp_inst = 0.0
+        fp_seen = False
         for col in (
             valu_f16_add_col,
             valu_f16_mul_col,
@@ -352,49 +387,44 @@ def collect_kernel_metrics(rows, headers, kernels, args):
             val = parse_number(row.get(col)) if col else None
             if val is not None:
                 fp_inst += val
-        if fp_inst:
-            data[label]["fp_inst"] += fp_inst
+                fp_seen = True
+        if fp_seen:
+            add(label, "fp_inst", fp_inst)
 
         if valu_cvt_col:
             val = parse_number(row.get(valu_cvt_col))
-            if val is not None:
-                data[label]["misc_inst"] += val
+            add(label, "misc_inst", val)
 
         if l1_ai_col:
             val = parse_number(row.get(l1_ai_col))
-            if val is not None:
-                data[label]["l1_ai_sum"] += val
-                data[label]["l1_ai_count"] += 1
+            add(label, "l1_ai", val)
         if l2_ai_col:
             val = parse_number(row.get(l2_ai_col))
-            if val is not None:
-                data[label]["l2_ai_sum"] += val
-                data[label]["l2_ai_count"] += 1
+            add(label, "l2_ai", val)
         if hbm_ai_col:
             val = parse_number(row.get(hbm_ai_col))
-            if val is not None:
-                data[label]["hbm_ai_sum"] += val
-                data[label]["hbm_ai_count"] += 1
+            add(label, "hbm_ai", val)
 
         if occupancy_col:
             val = parse_number(row.get(occupancy_col))
-            if val is not None:
-                data[label]["sustained_occupancy_sum"] += val
-                data[label]["sustained_occupancy_count"] += 1
+            add(label, "sustained_occupancy", val)
         if occupancy_peak_col:
             val = parse_number(row.get(occupancy_peak_col))
-            if val is not None:
-                data[label]["peak_occupancy_sum"] += val
-                data[label]["peak_occupancy_count"] += 1
+            add(label, "peak_occupancy", val)
         if efficiency_col:
             val = parse_number(row.get(efficiency_col))
-            if val is not None:
-                data[label]["efficiency_sum"] += val
-                data[label]["efficiency_count"] += 1
+            add(label, "efficiency", val)
 
-    if not data:
+    if not sums:
         raise ValueError("No kernels matched the provided list.")
 
+    data = {}
+    for kernel, key_totals in sums.items():
+        data[kernel] = {
+            key: key_totals[key] / counts[kernel][key]
+            for key in key_totals
+            if counts[kernel][key]
+        }
     return data
 
 
@@ -414,8 +444,8 @@ def main():
     parser.add_argument("--workload", required=True, help="Path to workload SOC directory")
     parser.add_argument("--kernels", required=True, help="Comma-separated list of kernel name substrings")
     parser.add_argument("--precision", default="fp32", choices=["fp32", "fp64"])
-    parser.add_argument("--pmc", default=None, help="Override pmc_perf.csv path")
-    parser.add_argument("--roofline", default=None, help="Override roofline.csv path")
+    parser.add_argument("--pmc", action="append", default=None, help="Override pmc_perf.csv path (repeatable)")
+    parser.add_argument("--roofline", action="append", default=None, help="Override roofline.csv path (repeatable)")
 
     parser.add_argument("--kernel-col", default=None)
     parser.add_argument("--fp32-perf-col", default=None)
@@ -440,13 +470,16 @@ def main():
         raise ValueError("--kernels is required")
 
     workload = args.workload
-    pmc_path = args.pmc or os.path.join(workload, "pmc_perf.csv")
-    roofline_path = args.roofline or os.path.join(workload, "roofline.csv")
+    pmc_paths = args.pmc or [os.path.join(workload, "pmc_perf.csv")]
+    roofline_paths = args.roofline or [os.path.join(workload, "roofline.csv")]
 
-    rows, headers = read_csv(pmc_path)
-    data = collect_kernel_metrics(rows, headers, kernels, args)
+    run_data = []
+    for pmc_path in pmc_paths:
+        rows, headers = read_csv(pmc_path)
+        run_data.append(collect_kernel_metrics(rows, headers, kernels, args))
+    data = merge_kernel_metrics_average(run_data)
 
-    peaks = parse_roofline_peaks(roofline_path)
+    peaks = average_peak_dicts([parse_roofline_peaks(path) for path in roofline_paths])
 
     kernel_order = [k for k in kernels if k in data]
 
@@ -479,30 +512,30 @@ def main():
         sp_perf = 0.0
         if d.get("fp32_flop") and d.get("time_s"):
             sp_perf = d["fp32_flop"] / (d["time_s"] * 1_000_000_000.0)
-        elif d.get("fp32_perf_count"):
-            sp_perf = d["fp32_perf_sum"] / d["fp32_perf_count"]
+        elif d.get("fp32_perf") is not None:
+            sp_perf = d["fp32_perf"]
 
         dp_perf = 0.0
         if d.get("fp64_flop") and d.get("time_s"):
             dp_perf = d["fp64_flop"] / (d["time_s"] * 1_000_000_000.0)
-        elif d.get("fp64_perf_count"):
-            dp_perf = d["fp64_perf_sum"] / d["fp64_perf_count"]
+        elif d.get("fp64_perf") is not None:
+            dp_perf = d["fp64_perf"]
 
         l1_ai = 0.0
         l2_ai = 0.0
         hbm_ai = 0.0
         if d.get("fp32_flop") and d.get("l1_bytes"):
             l1_ai = safe_div(d["fp32_flop"], d["l1_bytes"])
-        elif d.get("l1_ai_count"):
-            l1_ai = safe_div(d["l1_ai_sum"], d["l1_ai_count"])
+        elif d.get("l1_ai") is not None:
+            l1_ai = d["l1_ai"]
         if d.get("fp32_flop") and d.get("l2_bytes"):
             l2_ai = safe_div(d["fp32_flop"], d["l2_bytes"])
-        elif d.get("l2_ai_count"):
-            l2_ai = safe_div(d["l2_ai_sum"], d["l2_ai_count"])
+        elif d.get("l2_ai") is not None:
+            l2_ai = d["l2_ai"]
         if d.get("fp32_flop") and d.get("hbm_bytes"):
             hbm_ai = safe_div(d["fp32_flop"], d["hbm_bytes"])
-        elif d.get("hbm_ai_count"):
-            hbm_ai = safe_div(d["hbm_ai_sum"], d["hbm_ai_count"])
+        elif d.get("hbm_ai") is not None:
+            hbm_ai = d["hbm_ai"]
 
         if d.get("fp64_flop"):
             l1_dp_ai = safe_div(d["fp64_flop"], d.get("l1_bytes", 0.0))
@@ -530,13 +563,13 @@ def main():
         shared_perf = safe_div(shared_inst, time_s * 1_000_000_000.0)
         shared_intensity = safe_div(shared_inst, shared_txn)
 
-        sustained_occ = safe_div(d.get("sustained_occupancy_sum", 0.0), d.get("sustained_occupancy_count", 0.0))
-        peak_occ = safe_div(d.get("peak_occupancy_sum", 0.0), d.get("peak_occupancy_count", 0.0))
+        sustained_occ = d.get("sustained_occupancy", 0.0)
+        peak_occ = d.get("peak_occupancy", 0.0)
         if peak_occ <= 0.0:
             peak_occ = 100.0
         peak_occ_margin = max(0.0, peak_occ - sustained_occ)
 
-        efficiency = safe_div(d.get("efficiency_sum", 0.0), d.get("efficiency_count", 0.0))
+        efficiency = d.get("efficiency", 0.0)
 
         print(f"k{idx}_sp_perf = {sp_perf}")
         print(f"k{idx}_dp_perf = {dp_perf}")
