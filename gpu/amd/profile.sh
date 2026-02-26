@@ -13,6 +13,7 @@ Targets:
   plot            Build roofline plot (SP/FP32 by default)
   fp              Build SP/FP32 roofline
   dp              Build DP/FP64 roofline
+  int             Build INT32 roofline
   inst            Build instruction roofline
   shared          Build shared/LDS roofline
   instmix         Build instruction mix plot
@@ -23,7 +24,7 @@ Targets:
 Variables (same names as old Makefile):
   EXE (required for profile)         Executable to profile
   FLAGS                             Extra args passed to EXE
-  KERNELS                           Comma-separated kernel substrings
+  KERNELS                           Comma-separated kernel substrings (empty means all kernels)
   OUT_DIR (default: out)            Output directory
   WORKLOAD (default: profile)       Profiler workload name
   SOC                               Explicit SOC directory under workloads/WORKLOAD
@@ -36,7 +37,7 @@ Variables (same names as old Makefile):
   AMD2DAT_ARGS                      Extra args passed to omniperf2dat
   GNUPLOT (default: gnuplot)
   PSTOPDF (default: ps2pdf)
-  ROOFLINE_PRECISION (default: fp32)
+  ROOFLINE_PRECISION (default: fp32) fp32, fp64, or int32
 
 Examples:
   ./profile.sh profile EXE=/path/to/your/exe KERNELS=kernelA,kernelB
@@ -111,6 +112,8 @@ ROOFLINE_SP_PS="${OUT_DIR}/roofline-fp32.ps"
 ROOFLINE_SP_PDF="${OUT_DIR}/roofline-fp32.pdf"
 ROOFLINE_DP_PS="${OUT_DIR}/roofline-fp64.ps"
 ROOFLINE_DP_PDF="${OUT_DIR}/roofline-fp64.pdf"
+ROOFLINE_INT_PS="${OUT_DIR}/roofline-int32.ps"
+ROOFLINE_INT_PDF="${OUT_DIR}/roofline-int32.pdf"
 ROOFLINE_INST_PS="${OUT_DIR}/roofline-inst.ps"
 ROOFLINE_INST_PDF="${OUT_DIR}/roofline-inst.pdf"
 ROOFLINE_SHARED_PS="${OUT_DIR}/roofline-shared.ps"
@@ -145,10 +148,6 @@ run_profiler() {
 }
 
 build_dat() {
-  if [ -z "$KERNELS" ]; then
-    echo "ERROR: KERNELS is required for dat/plot/fp/dp/inst/shared/instmix/occupancy/predication." >&2
-    exit 1
-  fi
   if [ -z "$WORKLOAD_PATH" ] || [ ! -d "$WORKLOAD_PATH" ]; then
     echo "ERROR: workload path not found: ${WORKLOAD_PATH:-<empty>}" >&2
     echo "Run profile first or set WORKLOAD/SOC." >&2
@@ -170,6 +169,7 @@ plot_fp() {
 plot_roofline() {
   case "${ROOFLINE_PRECISION}" in
     fp64|dp) plot_dp ;;
+    int32|int) plot_int ;;
     *) plot_fp ;;
   esac
 }
@@ -179,6 +179,13 @@ plot_dp() {
   "$GNUPLOT" -e "outfile='${ROOFLINE_DP_PS}';precision='dp'" \
     "$DATA_FILE" "${SCRIPT_DIR}/roofline.gnuplot"
   "$PSTOPDF" "${ROOFLINE_DP_PS}" "${ROOFLINE_DP_PDF}"
+}
+
+plot_int() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${ROOFLINE_INT_PS}';precision='int'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/roofline.gnuplot"
+  "$PSTOPDF" "${ROOFLINE_INT_PS}" "${ROOFLINE_INT_PDF}"
 }
 
 plot_inst() {
@@ -221,6 +228,7 @@ clean() {
     "$DATA_FILE" \
     "$ROOFLINE_SP_PS" "$ROOFLINE_SP_PDF" \
     "$ROOFLINE_DP_PS" "$ROOFLINE_DP_PDF" \
+    "$ROOFLINE_INT_PS" "$ROOFLINE_INT_PDF" \
     "$ROOFLINE_INST_PS" "$ROOFLINE_INST_PDF" \
     "$ROOFLINE_SHARED_PS" "$ROOFLINE_SHARED_PDF" \
     "$INSTMIX_PS" "$INSTMIX_PDF" \
@@ -233,6 +241,7 @@ for t in "${targets[@]}"; do
     all)
       plot_fp
       plot_dp
+      plot_int
       plot_inst
       plot_shared
       plot_instmix
@@ -253,6 +262,9 @@ for t in "${targets[@]}"; do
       ;;
     dp)
       plot_dp
+      ;;
+    int|int32)
+      plot_int
       ;;
     inst)
       plot_inst

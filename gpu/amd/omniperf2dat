@@ -9,10 +9,14 @@ from collections import defaultdict
 
 
 def parse_kernels(arg):
+    if not arg:
+        return []
     return [k.strip() for k in arg.split(",") if k.strip()]
 
 
 def kernel_label(name, kernels):
+    if not kernels:
+        return name
     for k in kernels:
         if k in name:
             return k
@@ -82,6 +86,7 @@ def parse_roofline_peaks(path):
             "l1_peak": ["L1 BW", "L1_BW", "L1 Bandwidth", "L1 Peak BW", "vL1 BW"],
             "peak_fp": ["Peak FP32", "Peak FLOPs FP32", "FP32 Peak", "Peak GFLOP/s FP32"],
             "peak_dp": ["Peak FP64", "Peak FLOPs FP64", "FP64 Peak", "Peak GFLOP/s FP64"],
+            "peak_int": ["Peak INT32", "Peak I32", "Peak Int32", "Peak GIOP/s INT32", "Peak INT32 OP/s"],
         }
         for key, candidates in col_map.items():
             col = find_col(headers, candidates)
@@ -108,6 +113,7 @@ def parse_roofline_peaks(path):
                 "l1_peak": ["l1 bw", "l1 bandwidth", "vl1 bw"],
                 "peak_fp": ["peak fp32", "peak flops fp32", "fp32 peak"],
                 "peak_dp": ["peak fp64", "peak flops fp64", "fp64 peak"],
+                "peak_int": ["peak int32", "peak i32", "int32 peak"],
             }.items():
                 if any(p in lower for p in patterns):
                     val = parse_number(line)
@@ -442,8 +448,12 @@ def main():
         description="Generate gnuplot data file from rocprof-compute/omniperf CSV output."
     )
     parser.add_argument("--workload", required=True, help="Path to workload SOC directory")
-    parser.add_argument("--kernels", required=True, help="Comma-separated list of kernel name substrings")
-    parser.add_argument("--precision", default="fp32", choices=["fp32", "fp64"])
+    parser.add_argument(
+        "--kernels",
+        default="",
+        help="Comma-separated list of kernel name substrings (empty means all kernels)",
+    )
+    parser.add_argument("--precision", default="fp32", choices=["fp32", "fp64", "int32", "int"])
     parser.add_argument("--pmc", action="append", default=None, help="Override pmc_perf.csv path (repeatable)")
     parser.add_argument("--roofline", action="append", default=None, help="Override roofline.csv path (repeatable)")
 
@@ -466,8 +476,6 @@ def main():
     args = parser.parse_args()
 
     kernels = parse_kernels(args.kernels)
-    if not kernels:
-        raise ValueError("--kernels is required")
 
     workload = args.workload
     pmc_paths = args.pmc or [os.path.join(workload, "pmc_perf.csv")]
@@ -481,10 +489,14 @@ def main():
 
     peaks = average_peak_dicts([parse_roofline_peaks(path) for path in roofline_paths])
 
-    kernel_order = [k for k in kernels if k in data]
+    if kernels:
+        kernel_order = [k for k in kernels if k in data]
+    else:
+        kernel_order = list(data.keys())
 
     print(f"peak_fp = {peaks.get('peak_fp', 0)}")
     print(f"peak_dp = {peaks.get('peak_dp', 0)}")
+    print(f"peak_int = {peaks.get('peak_int', safe_div(peaks.get('peak_fp', 0), 2.0))}")
     print(f"l1_peak = {peaks.get('l1_peak', 0)}")
     print(f"l2_peak = {peaks.get('l2_peak', 0)}")
     print(f"hbm_peak = {peaks.get('hbm_peak', 0)}")
@@ -497,6 +509,7 @@ def main():
     point_types = kernel_point_types(len(kernel_order))
     roofline_sp_points = []
     roofline_dp_points = []
+    roofline_int_points = []
     roofline_inst_points = []
     roofline_shared_points = []
     instmix_lines = []
@@ -549,6 +562,10 @@ def main():
         insts = d.get("insts", 0.0)
         time_s = d.get("time_s", 0.0)
         inst_perf = safe_div(insts, time_s * 1_000_000_000.0)
+        int_inst = d.get("int_inst", 0.0)
+        int_perf = safe_div(int_inst, time_s * 1_000_000_000.0)
+        if int_perf == 0.0 and inst_perf > 0.0 and insts > 0.0:
+            int_perf = inst_perf * safe_div(int_inst, insts)
 
         l1_txn = safe_div(d.get("l1_bytes", 0.0), 32.0)
         l2_txn = safe_div(d.get("l2_bytes", 0.0), 32.0)
@@ -557,6 +574,9 @@ def main():
         l1_inst_intensity = safe_div(insts, l1_total_32b_txn)
         l2_inst_intensity = safe_div(insts, l2_txn)
         hbm_inst_intensity = safe_div(insts, hbm_txn)
+        l1_int_ai = safe_div(int_inst, d.get("l1_bytes", 0.0))
+        l2_int_ai = safe_div(int_inst, d.get("l2_bytes", 0.0))
+        hbm_int_ai = safe_div(int_inst, d.get("hbm_bytes", 0.0))
 
         shared_inst = d.get("shared_inst", 0.0)
         shared_txn = safe_div(d.get("lds_bytes", 0.0), 32.0)
@@ -573,6 +593,7 @@ def main():
 
         print(f"k{idx}_sp_perf = {sp_perf}")
         print(f"k{idx}_dp_perf = {dp_perf}")
+        print(f"k{idx}_int_perf = {int_perf}")
         print(f"k{idx}_inst_perf = {inst_perf}")
         print(f"k{idx}_warp_shared_instruction_performance = {shared_perf}")
         print(f"k{idx}_shared_warp_inst_intensity = {shared_intensity}")
@@ -582,6 +603,9 @@ def main():
         print(f"k{idx}_l1_dp_intensity = {l1_dp_ai}")
         print(f"k{idx}_l2_dp_intensity = {l2_dp_ai}")
         print(f"k{idx}_hbm_dp_intensity = {hbm_dp_ai}")
+        print(f"k{idx}_l1_int_intensity = {l1_int_ai}")
+        print(f"k{idx}_l2_int_intensity = {l2_int_ai}")
+        print(f"k{idx}_hbm_int_intensity = {hbm_int_ai}")
         print(f"k{idx}_l1_inst_intensity = {l1_inst_intensity}")
         print(f"k{idx}_l2_inst_intensity = {l2_inst_intensity}")
         print(f"k{idx}_hbm_inst_intensity = {hbm_inst_intensity}")
@@ -610,6 +634,18 @@ def main():
             f"[0:0:1] '+' us (k{idx}_hbm_dp_intensity):(k{idx}_dp_perf) "
             f"with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
         )
+        roofline_int_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_int_intensity):(k{idx}_int_perf) "
+            f"with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
+        )
+        roofline_int_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_int_intensity):(k{idx}_int_perf) "
+            f"with points lc rgb l2_color pt kernel_point_{idx} ps point_size notitle"
+        )
+        roofline_int_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_int_intensity):(k{idx}_int_perf) "
+            f"with points lc rgb hbm_color pt kernel_point_{idx} ps point_size notitle"
+        )
         roofline_inst_points.append(
             f"[0:0:1] '+' us (k{idx}_l1_inst_intensity):(k{idx}_inst_perf) "
             f"with points lc rgb l1_color pt kernel_point_{idx} ps point_size title kernel_name_{idx}"
@@ -629,7 +665,6 @@ def main():
 
         if insts > 0:
             fp_inst = d.get("fp_inst", 0.0)
-            int_inst = d.get("int_inst", 0.0)
             mem_inst = d.get("mem_inst", 0.0)
             cf_inst = d.get("cf_inst", 0.0)
             misc_inst = d.get("misc_inst", 0.0)
@@ -650,6 +685,7 @@ def main():
 
     print("\nroofline_sp_points = \"" + ", ".join(roofline_sp_points) + "\"")
     print("\nroofline_dp_points = \"" + ", ".join(roofline_dp_points) + "\"")
+    print("\nroofline_int_points = \"" + ", ".join(roofline_int_points) + "\"")
     print("\nroofline_inst_points = \"" + ", ".join(roofline_inst_points) + "\"")
     print("\nroofline_shared_points = \"" + ", ".join(roofline_shared_points) + "\"")
     print("\n$occupancy << EOD")

@@ -28,8 +28,8 @@ parser.add_argument(
 parser.add_argument(
     "--kernels",
     "-k",
-    required=True,
-    help="Comma-separated list of kernel name substrings to include",
+    default="",
+    help="Comma-separated list of kernel name substrings to include (empty means all kernels)",
 )
 parser.add_argument(
     "--raw",
@@ -390,13 +390,17 @@ def sum_dicts(dicts):
 
 
 def parse_kernels(arg):
+    if not arg:
+        return []
     return [k.strip() for k in arg.split(",") if k.strip()]
 
 
 def match_kernel(name, kernels):
-    return any(k in name for k in kernels)
+    return not kernels or any(k in name for k in kernels)
 
 def kernel_label(name, kernels):
+    if not kernels:
+        return name.split(", Context ", 1)[0].strip()
     for k in kernels:
         if k in name:
             return k
@@ -522,10 +526,12 @@ def data_to_roofline_vars(data):
     elapsed_s = data["elapsed_s"]
     sp_perf = safe_div(data["fp_flop"], elapsed_s * 1000000000.0)
     dp_perf = safe_div(data["dp_flop"], elapsed_s * 1000000000.0)
+    int_perf = safe_div(data["int_instructions"], elapsed_s * 1000000000.0)
     inst_perf = safe_div(data["thread_instructions"], elapsed_s * 1000000000.0)
     return {
         "sp_perf": sp_perf,
         "dp_perf": dp_perf,
+        "int_perf": int_perf,
         "inst_perf": inst_perf,
         "warp_shared_instruction_performance": safe_div(
             data["warp_shared_ld_st_instructions"], elapsed_s * 1000000000.0
@@ -539,6 +545,9 @@ def data_to_roofline_vars(data):
         "l1_dp_intensity": safe_div(data["dp_flop"], data["l1_bytes"]),
         "l2_dp_intensity": safe_div(data["dp_flop"], data["l2_bytes"]),
         "hbm_dp_intensity": safe_div(data["dp_flop"], data["dram_bytes"]),
+        "l1_int_intensity": safe_div(data["int_instructions"], data["l1_bytes"]),
+        "l2_int_intensity": safe_div(data["int_instructions"], data["l2_bytes"]),
+        "hbm_int_intensity": safe_div(data["int_instructions"], data["dram_bytes"]),
         "l1_inst_intensity": safe_div(
             data["thread_instructions"], data["l1_total_32B_transactions"]
         ),
@@ -690,6 +699,7 @@ def peaks_from_raw(metrics, units, arch):
 
     sp_peak_key = "sm__sass_thread_inst_executed_op_ffma_pred_on.sum.peak_sustained"
     dp_peak_key = "sm__sass_thread_inst_executed_op_dfma_pred_on.sum.peak_sustained"
+    int_peak_key = "sm__sass_thread_inst_executed_op_integer_pred_on.sum.peak_sustained"
     sm_cycles_key = "sm__cycles_elapsed.avg.per_second"
     if sm_cycles_key in metrics:
         sm_cycles_per_s = per_second_to_hz(
@@ -717,6 +727,14 @@ def peaks_from_raw(metrics, units, arch):
                     metrics[dp_peak_key] * 2.0 * sm_cycles_per_s / 1000000000.0
                 )
             peaks["peak_nofma_dp"] = peaks["peak_dp"] / 2.0
+        if int_peak_key in metrics:
+            int_unit = units.get(int_peak_key, "")
+            if is_per_second(int_unit):
+                peaks["peak_int"] = per_second_to_hz(metrics[int_peak_key], int_unit) / 1000000000.0
+            else:
+                peaks["peak_int"] = metrics[int_peak_key] * sm_cycles_per_s / 1000000000.0
+        elif "peak_nofma_fp" in peaks:
+            peaks["peak_int"] = peaks["peak_nofma_fp"]
 
     smsp_cycles_key = "smsp__cycles_elapsed.avg.per_second"
     smsp_sum_key = "smsp__inst_executed.sum.peak_sustained"
@@ -958,6 +976,7 @@ if __name__ == "__main__":
     point_types = kernel_point_types(len(kernel_order))
     roofline_sp_points = []
     roofline_dp_points = []
+    roofline_int_points = []
     roofline_inst_points = []
     roofline_shared_points = []
     data_block = []
@@ -1016,6 +1035,18 @@ if __name__ == "__main__":
             f"[0:0:1] '+' us (k{idx}_hbm_dp_intensity):(k{idx}_dp_perf) "
             f"with points lc rgb hbm_color pt {point_key} ps point_size notitle"
         )
+        roofline_int_points.append(
+            f"[0:0:1] '+' us (k{idx}_l1_int_intensity):(k{idx}_int_perf) "
+            f"with points lc rgb l1_color pt {point_key} ps point_size title {name_key}"
+        )
+        roofline_int_points.append(
+            f"[0:0:1] '+' us (k{idx}_l2_int_intensity):(k{idx}_int_perf) "
+            f"with points lc rgb l2_color pt {point_key} ps point_size notitle"
+        )
+        roofline_int_points.append(
+            f"[0:0:1] '+' us (k{idx}_hbm_int_intensity):(k{idx}_int_perf) "
+            f"with points lc rgb hbm_color pt {point_key} ps point_size notitle"
+        )
         roofline_inst_points.append(
             f"[0:0:1] '+' us (k{idx}_l1_inst_intensity):(k{idx}_inst_perf) "
             f"with points lc rgb l1_color pt {point_key} ps point_size title {name_key}"
@@ -1042,6 +1073,7 @@ if __name__ == "__main__":
         predication_block.append(f"\"{escaped_name}\" {data.get('efficiency', 0.0)}")
     output = output + "\nroofline_sp_points = \"" + ", ".join(roofline_sp_points) + "\"\n"
     output = output + "\nroofline_dp_points = \"" + ", ".join(roofline_dp_points) + "\"\n"
+    output = output + "\nroofline_int_points = \"" + ", ".join(roofline_int_points) + "\"\n"
     output = output + "\nroofline_inst_points = \"" + ", ".join(roofline_inst_points) + "\"\n"
     output = output + "\nroofline_shared_points = \"" + ", ".join(roofline_shared_points) + "\"\n"
     output = output + "\n$occupancy << EOD\n" + "\n".join(occupancy_block) + "\nEOD\n"

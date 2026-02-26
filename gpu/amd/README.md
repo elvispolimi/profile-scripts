@@ -19,6 +19,7 @@ Outputs:
 - `gpu/amd/out/profile.dat`
 - `gpu/amd/out/roofline-fp32.pdf`
 - `gpu/amd/out/roofline-fp64.pdf`
+- `gpu/amd/out/roofline-int32.pdf`
 - `gpu/amd/out/roofline-inst.pdf`
 - `gpu/amd/out/roofline-shared.pdf`
 - `gpu/amd/out/instmix.pdf` (with full profiling counters)
@@ -26,7 +27,7 @@ Outputs:
 - `gpu/amd/out/hist-predication.pdf` (best-effort from available efficiency columns)
 
 ## Common variables
-- `KERNELS` (required): comma-separated kernel name substrings used to group and label kernels.
+- `KERNELS` (optional): comma-separated kernel name substrings used to group and label kernels. Leave empty to include all kernels found in the workload.
 - `EXE`, `FLAGS`: executable and its arguments.
 - `WORKLOAD`: name for the profiler run directory (default: `profile`).
 - `SOC`: optional, set to the specific SOC directory under `workloads/WORKLOAD`.
@@ -34,7 +35,7 @@ Outputs:
 - `PROFILER_ARGS`: extra profiler args (e.g., device selection).
 - `PROFILER_CMD`: full command override if you want a custom invocation.
 - `AMD2DAT_ARGS`: extra args passed to `omniperf2dat` (for example repeated `--pmc`/`--roofline`).
-- `ROOFLINE_PRECISION`: `fp32` or `fp64`.
+- `ROOFLINE_PRECISION`: `fp32`, `fp64`, or `int32`.
 - `ROOF_ONLY`: set to `0` to enable full profiling (required for instruction mix).
 - `PSTOPDF`: `ps2pdf` binary used to convert PostScript outputs to PDF.
 
@@ -42,6 +43,7 @@ Outputs:
 - `./profile.sh` or `./profile.sh all`: build all plots.
 - `./profile.sh fp`: build only FP32 roofline.
 - `./profile.sh dp`: build only FP64 roofline.
+- `./profile.sh int`: build only INT32 roofline.
 - `./profile.sh inst`: build instruction roofline.
 - `./profile.sh shared`: build shared/LDS roofline.
 - `./profile.sh instmix`: build instruction mix histogram.
@@ -51,7 +53,7 @@ Outputs:
 
 ## Notes
 - `omniperf2dat` tries to find common column names in `pmc_perf.csv` / `roofline.csv`. If your ROCm version uses different names, use override flags such as `--occupancy-col` / `--efficiency-col` through `AMD2DAT`.
-- Overlapping `KERNELS` substrings will aggregate multiple kernels under the first match.
+- Overlapping `KERNELS` substrings will aggregate multiple kernels under the first match. If `KERNELS` is empty, kernels are emitted with their full profiler names.
 - Instruction/shared rooflines and occupancy/predication use best-effort metric mapping for AMD and may require column overrides per ROCm/GPU generation.
 - Aggregation semantics: repeated dispatches of the same matched kernel are averaged (not summed). If multiple `--pmc` / `--roofline` files are provided to `omniperf2dat`, per-kernel metrics and bottleneck peaks are averaged across runs.
 

@@ -11,7 +11,7 @@ mix plots. Plot data is derived from a single raw NCU report.
 
 ## Quick start
 
-Run the executable and build all plots (kernel list required):
+Run the executable and build all plots:
 
 ```sh
 ./profile.sh EXE=/absolute/path/to/your/exe KERNELS=kernelA,kernelB
@@ -21,6 +21,7 @@ Outputs are written under `out/` by default:
 
 - `out/roofline-sp.pdf`
 - `out/roofline-dp.pdf`
+- `out/roofline-int.pdf`
 - `out/roofline-inst.pdf`
 - `out/roofline-shared.pdf`
 - `out/instmix.pdf`
@@ -34,6 +35,7 @@ listed in `METRICS`.
 
 - `./profile.sh` builds all plots.
 - `./profile.sh fp` builds only the SP roofline.
+- `./profile.sh int` builds only the integer roofline.
 - `./profile.sh inst` builds only the instruction roofline.
 - `./profile.sh shared` builds the shared memory roofline plot.
 - `./profile.sh instmix` builds only the instruction mix histogram.
@@ -47,12 +49,13 @@ listed in `METRICS`.
 - `EXE` (required): path to the executable to profile. Prefer absolute paths.
 - `FLAGS`: extra arguments passed to the executable.
 - `OUT_DIR`: output directory (default: `out`).
-- `KERNELS` (required): comma-separated list of kernel name substrings to include; also passed to NCU via `--kernel-name` to profile only those kernels. These substrings are also used as the labels in the generated `.dat` file.
+- `KERNELS` (optional): comma-separated list of kernel name substrings to include; passed to NCU via `--kernel-name` and used as labels in the generated `.dat` file. Leave empty to include all profiled kernels.
 - `ARCH` (optional): GPU compute capability used to pick the right L1 writeback metrics (e.g., `ARCH=80` for Ampere, `ARCH=90` for Hopper). Default: `80`.
 - `NCU2DAT_ARGS` (optional): extra arguments passed to `ncu2dat` (e.g., `--tensor-flop-factor`, `--debug-ai`).
 - `NCU_KERNEL_NAME_BASE`: base name used by NCU for matching kernels (default: `demangled`).
 - `METRICSFILE`: path to the metrics list (default: `METRICS`).
-- `ROOFLINE_PRECISION`: peak selection for roofline (`fp` or `dp`, default: `fp`).
+- `ROOFLINE_PRECISION`: peak selection for roofline (`fp`, `dp`, or `int`, default: `fp`).
+- `peak_int` (gnuplot override): integer peak in GINTOP/s for `roofline-int` (defaults to `peak_nofma_fp` when not present in raw data).
 - `NCU_RUNS`: number of NCU runs to capture (default: `1`).
 - `NCU_WARMUP`: number of initial runs to discard when averaging (default: `0`).
 - `shared_peak` (gnuplot override): shared memory peak in GTXN/s for `roofline-shared` (default falls back to `l1_peak_txn` if present).

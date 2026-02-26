@@ -11,6 +11,7 @@ Targets:
   dat            Generate profile.dat only
   fp             Build SP roofline
   dp             Build DP roofline
+  int            Build integer roofline
   inst           Build instruction roofline
   shared         Build shared memory roofline
   instmix         Build instruction mix histogram
@@ -22,14 +23,14 @@ Variables (same names as old Makefile):
   EXE (required)                     Executable to profile
   FLAGS                             Extra args passed to EXE
   OUT_DIR (default: out)             Output directory
-  KERNELS (required)                 Comma-separated kernel substrings
+  KERNELS                            Comma-separated kernel substrings (empty means all kernels)
   ARCH (default: 80)                 GPU compute capability
   NCU (default: ncu)                 Nsight Compute binary
   GNUPLOT (default: gnuplot)         Gnuplot binary
   PSTOPDF (default: ps2pdf)          ps2pdf binary
   METRICSFILE (default: METRICS)     Metrics list file
   NCU2DAT_ARGS                       Extra args passed to ncu2dat
-  ROOFLINE_PRECISION (default: fp)   fp or dp
+  ROOFLINE_PRECISION (default: fp)   fp, dp, or int
   NCU_RUNS (default: 1)              Number of NCU runs
   NCU_WARMUP (default: 0)            Warmup runs to discard
   NCU_KERNEL_NAME_BASE (default: demangled)
@@ -123,8 +124,8 @@ RAW_FILE_STAMP="${OUT_DIR}/profile.raw.stamp"
 DATA_FILE="${OUT_DIR}/profile.dat"
 
 run_ncu() {
-  if [ -z "$EXE" ] || [ -z "$KERNELS" ]; then
-    echo "ERROR: EXE and KERNELS are required to profile." >&2
+  if [ -z "$EXE" ]; then
+    echo "ERROR: EXE is required to profile." >&2
     exit 1
   fi
   ensure_out_dir
@@ -174,6 +175,13 @@ plot_dp() {
   "$PSTOPDF" "${OUT_DIR}/roofline-dp.ps" "${OUT_DIR}/roofline-dp.pdf"
 }
 
+plot_int() {
+  build_dat
+  "$GNUPLOT" -e "outfile='${OUT_DIR}/roofline-int.ps';precision='int'" \
+    "$DATA_FILE" "${SCRIPT_DIR}/roofline.gnuplot"
+  "$PSTOPDF" "${OUT_DIR}/roofline-int.ps" "${OUT_DIR}/roofline-int.pdf"
+}
+
 plot_inst() {
   build_dat
   "$GNUPLOT" -e "outfile='${OUT_DIR}/roofline-inst.ps'" \
@@ -213,6 +221,7 @@ clean() {
   rm -f \
     "${OUT_DIR}/roofline-sp.pdf" \
     "${OUT_DIR}/roofline-dp.pdf" \
+    "${OUT_DIR}/roofline-int.pdf" \
     "${OUT_DIR}/roofline-inst.pdf" \
     "${OUT_DIR}/roofline-shared.pdf" \
     "${OUT_DIR}/instmix.pdf" \
@@ -220,6 +229,7 @@ clean() {
     "${OUT_DIR}/hist-predication.pdf" \
     "${OUT_DIR}/roofline-sp.ps" \
     "${OUT_DIR}/roofline-dp.ps" \
+    "${OUT_DIR}/roofline-int.ps" \
     "${OUT_DIR}/roofline-inst.ps" \
     "${OUT_DIR}/roofline-shared.ps" \
     "${OUT_DIR}/instmix.ps" \
@@ -235,6 +245,7 @@ for t in "${targets[@]}"; do
     all)
       plot_fp
       plot_dp
+      plot_int
       plot_inst
       plot_shared
       plot_instmix
@@ -249,6 +260,9 @@ for t in "${targets[@]}"; do
       ;;
     dp)
       plot_dp
+      ;;
+    int)
+      plot_int
       ;;
     inst)
       plot_inst
