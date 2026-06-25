@@ -1,0 +1,28 @@
+{
+  "preset_name": "Branch Predictor Analysis",
+  "metrics": [
+    {
+      "name": "IPC (Ins/Cycle)",
+      "formula": "PAPI_TOT_INS / PAPI_TOT_CYC",
+      "format": "{val:.3f}",
+      "thresholds": [
+        {"min": 0.0, "tag": "Pipeline-bound"}
+      ]
+    },
+    {
+      "name": "Branch Miss Rate (%)",
+      "formula": "(PAPI_BR_MSP / PAPI_BR_INS) * 100",
+      "format": "{val:.2f}%",
+      "thresholds": [
+        {"min": 5.0, "tag": "Branch-bound"}
+      ]
+    },
+    {
+      "name": "Branch / Instructions (%)",
+      "formula": "(PAPI_BR_INS / PAPI_TOT_INS) * 100",
+      "format": "{val:.2f}%",
+      "thresholds": []
+    }
+  ]
+}
+

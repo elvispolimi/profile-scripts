@@ -1,0 +1,14 @@
+{
+  "preset_name": "IPC Only (Instructions Per Cycle)",
+  "metrics": [
+    {
+      "name": "IPC (Ins/Cycle)",
+      "formula": "PAPI_TOT_INS / PAPI_TOT_CYC",
+      "format": "{val:.3f}",
+      "thresholds": [
+        {"min": 0.0, "tag": "Pipeline-bound"}
+      ]
+    }
+  ]
+}
+

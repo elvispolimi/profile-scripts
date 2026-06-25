@@ -1,0 +1,37 @@
+{
+  "preset_name": "Cache Hierarchy & Data Locality",
+  "metrics": [
+    {
+      "name": "IPC (Ins/Cycle)",
+      "formula": "PAPI_TOT_INS / PAPI_TOT_CYC",
+      "format": "{val:.3f}",
+      "thresholds": [
+        {"min": 0.0, "tag": "Pipeline-bound"}
+      ]
+    },
+    {
+      "name": "L1 MPKI (miss/KIns)",
+      "formula": "(PAPI_L1_DCM / PAPI_TOT_INS) * 1000",
+      "format": "{val:.3f}",
+      "thresholds": [
+        {"min": 50.0, "tag": "L1-bound"}
+      ]
+    },
+    {
+      "name": "L2 MPKI (miss/KIns)",
+      "formula": "(PAPI_L2_DCM / PAPI_TOT_INS) * 1000",
+      "format": "{val:.3f}",
+      "thresholds": [
+        {"min": 10.0, "tag": "Memory-bound"}
+      ]
+    },
+    {
+      "name": "TLB-D MPKI (miss/KIns)",
+      "formula": "(PAPI_TLB_DM / PAPI_TOT_INS) * 1000",
+      "format": "{val:.3f}",
+      "thresholds": [
+        {"min": 1.0, "tag": "High TLB Pressure"}
+      ]
+    }
+  ]
+}
